@@ -1,0 +1,10 @@
+Test Summary Report - Tue 17 Jun 2025 20:39:53 AEST
+
+Unit Tests Status:
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+Session Parsing Tests Status:
+test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+Integration Tests Status:
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.31s
