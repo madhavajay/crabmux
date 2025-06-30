@@ -1,6 +1,6 @@
 # crabmux 🦀
 
-![crabmux](images/crabmux.png)
+<img src="images/logo.png" alt="crabmux" width="200px" />
 
 A mobile-friendly tmux session manager with an interactive TUI, designed for quick navigation with minimal keypresses.
 
@@ -37,7 +37,7 @@ sudo pacman -S tmux
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/crabmux.git
+git clone https://github.com/madhavajay/crabmux.git
 cd crabmux
 
 # Build and install
@@ -51,7 +51,7 @@ cargo install --path .
 ### Quick Install (One-liner)
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/yourusername/crabmux/main/install.sh | bash
+curl -sSL https://raw.githubusercontent.com/madhavajay/crabmux/main/install.sh | bash
 ```
 
 This will automatically:

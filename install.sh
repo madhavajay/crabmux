@@ -60,7 +60,7 @@ detect_platform() {
 
 # Get latest release version
 get_latest_version() {
-    local api_url="https://api.github.com/repos/yourusername/crabmux/releases/latest"
+    local api_url="https://api.github.com/repos/madhavajay/crabmux/releases/latest"
     
     # Try to get version from GitHub API
     if command -v curl >/dev/null 2>&1; then
@@ -85,7 +85,7 @@ install_crabmux() {
         binary_name="${binary_name}.exe"
     fi
     
-    local download_url="https://github.com/yourusername/crabmux/releases/download/${version}/${binary_name}"
+    local download_url="https://github.com/madhavajay/crabmux/releases/download/${version}/${binary_name}"
     local temp_file="/tmp/${binary_name}"
     
     print_status "Downloading crabmux ${version} for ${platform}..."
