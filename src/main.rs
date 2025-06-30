@@ -230,9 +230,9 @@ impl App {
     /// Get fallback selection indicators for terminals with limited symbol support
     fn get_selection_prefix(&self, selected: bool) -> String {
         if selected {
-            "> ".to_string()
+            ">".to_string()
         } else {
-            "  ".to_string()
+            " ".to_string()
         }
     }
 
@@ -840,7 +840,7 @@ fn draw_top_ui(f: &mut Frame, app: &App) {
         })
         .collect();
 
-    let title = "Sessions │ Name        │ Win │ Memory  │ CPU    │ User    ";
+    let title = " │ Name             │Win │  Memory │   CPU │ User    ";
     // Helper function to get terminal-appropriate styles
     fn get_top_ui_highlight_style() -> Style {
         let term = std::env::var("TERM").unwrap_or_else(|_| "unknown".to_string());
@@ -897,7 +897,7 @@ fn draw_top_ui(f: &mut Frame, app: &App) {
     let help_text = "Press 'q' to quit, 'r' to refresh, Ctrl+C to exit";
     let help = Paragraph::new(help_text)
         .style(Style::default().fg(Color::Gray))
-        .alignment(Alignment::Center)
+        .alignment(Alignment::Left)
         .block(Block::default().borders(Borders::ALL));
     f.render_widget(help, chunks[2]);
 }
@@ -942,6 +942,11 @@ fn run_tui() -> Result<()> {
                     enable_raw_mode()?;
                     let mut new_stdout = io::stdout();
                     execute!(new_stdout, EnterAlternateScreen, EnableMouseCapture)?;
+                    
+                    // Clear the screen and refresh the terminal
+                    let backend = CrosstermBackend::new(new_stdout);
+                    terminal = Terminal::new(backend)?;
+                    terminal.clear()?;
                     app.refresh()?;
                 }
             }
@@ -1094,33 +1099,32 @@ fn draw_ui(f: &mut Frame, app: &mut App, list_state: &mut ListState) {
                 
                 let content = Line::from(vec![
                     Span::styled(
-                        selection_prefix,
+                        format!("{:<1}", selection_prefix),
                         Style::default().fg(if i == app.selected { Color::Yellow } else { Color::DarkGray }).add_modifier(if i == app.selected { Modifier::BOLD } else { Modifier::empty() }),
                     ),
                     Span::styled(
-                        status,
+                        format!("{:<1}", status),
                         Style::default().fg(if s.attached { Color::Green } else { Color::Red }),
                     ),
                     Span::raw(" "),
                     Span::styled(
-                        format!("{:<12}", s.name),
+                        format!("{:<15}", s.name),
                         Style::default().fg(
                             if i == app.selected { Color::Yellow } else { Color::White }
                         ).add_modifier(if i == app.selected { Modifier::BOLD | Modifier::UNDERLINED } else { Modifier::BOLD }),
                     ),
-                    Span::raw(" "),
                     Span::styled(
-                        format!("{}W", s.windows),
+                        format!("{:>3}W", s.windows),
                         Style::default().fg(if i == app.selected { Color::Yellow } else { Color::Yellow }),
                     ),
                     Span::raw(" "),
                     Span::styled(
-                        format!("{:<6}", memory_info),
+                        format!("{:>8}", memory_info),
                         Style::default().fg(if i == app.selected { Color::Yellow } else { Color::Cyan }),
                     ),
                     Span::raw(" "),
                     Span::styled(
-                        format!("{:<5}", cpu_info),
+                        format!("{:>6}", cpu_info),
                         Style::default().fg(if i == app.selected { Color::Yellow } else { Color::Magenta }),
                     ),
                     Span::raw(" "),
@@ -1164,7 +1168,7 @@ fn draw_ui(f: &mut Frame, app: &mut App, list_state: &mut ListState) {
 
     let help = Paragraph::new(help_text.join("\n"))
         .style(Style::default().fg(Color::Gray))
-        .alignment(Alignment::Center)
+        .alignment(Alignment::Left)
         .wrap(Wrap { trim: true })
         .block(Block::default().borders(Borders::ALL).title("Controls"));
     f.render_widget(help, chunks[2]);
