@@ -345,10 +345,16 @@ fn get_tmux_sessions_with_executor_and_system(
     let output = executor.execute_command(&["list-sessions", "-F", "#{session_name}:#{session_windows}:#{session_attached}:#{session_created}:#{session_activity}"])?;
 
     if !output.status.success() {
-        if output.stderr.starts_with(b"no server running") {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        // Handle various tmux error messages for no server
+        if stderr.contains("no server running") || 
+           stderr.contains("no sessions") || 
+           stderr.contains("no current client") ||
+           stderr.contains("can't find session") ||
+           stderr.contains("server not found") {
             return Ok(Vec::new());
         }
-        return Err(anyhow::anyhow!("tmux command failed"));
+        return Err(anyhow::anyhow!("tmux command failed: {}", stderr.trim()));
     }
 
     let mut sessions = parse_tmux_sessions(&String::from_utf8_lossy(&output.stdout));
