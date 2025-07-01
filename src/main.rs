@@ -1,3 +1,5 @@
+#![allow(clippy::uninlined_format_args)]
+
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use crossterm::{
