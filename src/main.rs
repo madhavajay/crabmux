@@ -347,11 +347,12 @@ fn get_tmux_sessions_with_executor_and_system(
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         // Handle various tmux error messages for no server
-        if stderr.contains("no server running") || 
-           stderr.contains("no sessions") || 
-           stderr.contains("no current client") ||
-           stderr.contains("can't find session") ||
-           stderr.contains("server not found") {
+        if stderr.contains("no server running")
+            || stderr.contains("no sessions")
+            || stderr.contains("no current client")
+            || stderr.contains("can't find session")
+            || stderr.contains("server not found")
+        {
             return Ok(Vec::new());
         }
         return Err(anyhow::anyhow!("tmux command failed: {}", stderr.trim()));
