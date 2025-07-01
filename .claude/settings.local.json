@@ -29,7 +29,9 @@
       "Bash(gh pr checks:*)",
       "Bash(gh run view:*)",
       "Bash(git add:*)",
-      "Bash(git commit:*)"
+      "Bash(git commit:*)",
+      "Bash(git push:*)",
+      "Bash(grep:*)"
     ],
     "deny": []
   }

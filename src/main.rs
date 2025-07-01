@@ -154,6 +154,7 @@ struct App {
     sessions: Vec<TmuxSession>,
     selected: usize,
     show_help: bool,
+    #[allow(dead_code)]
     aliases: HashMap<String, String>,
     show_new_session_popup: bool,
     new_session_input: String,
@@ -328,6 +329,7 @@ fn get_tmux_sessions_with_system(system: &mut System) -> Result<Vec<TmuxSession>
     get_tmux_sessions_with_executor_and_system(&DefaultTmuxExecutor, system)
 }
 
+#[allow(dead_code)]
 fn get_tmux_sessions_with_executor(executor: &dyn TmuxExecutor) -> Result<Vec<TmuxSession>> {
     let mut system = System::new_all();
     system.refresh_all();
@@ -488,7 +490,7 @@ fn attach_session(session_name: Option<String>) -> Result<()> {
     };
 
     let status = Command::new("tmux")
-        .args(&["attach-session", "-t", &target_session])
+        .args(["attach-session", "-t", &target_session])
         .status()
         .context("Failed to execute tmux attach command")?;
 
@@ -507,7 +509,7 @@ fn new_session(name: Option<String>) -> Result<()> {
     cmd.arg("new-session");
 
     if let Some(session_name) = name {
-        cmd.args(&["-s", &session_name]);
+        cmd.args(["-s", &session_name]);
     }
 
     let status = cmd
@@ -538,7 +540,7 @@ fn kill_session(session_name: Option<String>) -> Result<()> {
     };
 
     let status = Command::new("tmux")
-        .args(&["kill-session", "-t", &target_session])
+        .args(["kill-session", "-t", &target_session])
         .status()
         .context("Failed to execute tmux kill-session command")?;
 
@@ -555,7 +557,7 @@ fn kill_session(session_name: Option<String>) -> Result<()> {
 
 fn rename_session(old_name: &str, new_name: &str) -> Result<()> {
     let status = Command::new("tmux")
-        .args(&["rename-session", "-t", old_name, new_name])
+        .args(["rename-session", "-t", old_name, new_name])
         .status()
         .context("Failed to execute tmux rename command")?;
 
@@ -594,7 +596,7 @@ fn restore_sessions(file: Option<PathBuf>) -> Result<()> {
         }
 
         Command::new("tmux")
-            .args(&["new-session", "-d", "-s", &session.name])
+            .args(["new-session", "-d", "-s", &session.name])
             .status()
             .context("Failed to create session")?;
 
@@ -711,7 +713,7 @@ fn show_session_info(session_name: Option<String>) -> Result<()> {
 
     // Get window details
     let output = Command::new("tmux")
-        .args(&[
+        .args([
             "list-windows",
             "-t",
             &target_session.name,
@@ -757,7 +759,7 @@ fn kill_all_sessions() -> Result<()> {
 
     for session in sessions {
         Command::new("tmux")
-            .args(&["kill-session", "-t", &session.name])
+            .args(["kill-session", "-t", &session.name])
             .status()?;
         println!("Killed: {}", session.name);
     }
@@ -1207,7 +1209,7 @@ fn draw_ui(f: &mut Frame, app: &mut App, list_state: &mut ListState) {
                         Style::default().fg(if i == app.selected {
                             Color::Yellow
                         } else {
-                            Color::Yellow
+                            Color::White
                         }),
                     ),
                     Span::raw(" "),
