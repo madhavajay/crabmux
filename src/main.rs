@@ -537,14 +537,9 @@ fn new_session(name: Option<String>) -> Result<()> {
 }
 
 fn kill_session(session_name: Option<String>) -> Result<()> {
-    let sessions = get_tmux_sessions()?;
-
     let target_session = match session_name {
         Some(name) => name,
         None => {
-            if sessions.is_empty() {
-                return Err(anyhow::anyhow!("No tmux sessions found"));
-            }
             // In interactive mode, we'd select, but in CLI mode, refuse to kill without name
             return Err(anyhow::anyhow!("Please specify a session name to kill"));
         }
