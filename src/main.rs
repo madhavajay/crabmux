@@ -354,6 +354,7 @@ fn get_tmux_sessions_with_executor_and_system(
             || stderr.contains("server not found")
             || stderr.contains("error connecting to")
             || stderr.contains("No such file or directory")
+            || stderr.contains("server exited unexpectedly")
         {
             return Ok(Vec::new());
         }
