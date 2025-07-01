@@ -1,7 +1,11 @@
+#![allow(clippy::uninlined_format_args)]
+
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyModifiers},
+    event::{
+        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyModifiers,
+    },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -152,6 +156,7 @@ struct App {
     sessions: Vec<TmuxSession>,
     selected: usize,
     show_help: bool,
+    #[allow(dead_code)]
     aliases: HashMap<String, String>,
     show_new_session_popup: bool,
     new_session_input: String,
@@ -181,7 +186,7 @@ impl App {
         let term = std::env::var("TERM").unwrap_or_else(|_| "unknown".to_string());
         let term_program = std::env::var("TERM_PROGRAM").unwrap_or_else(|_| "unknown".to_string());
         let colorterm = std::env::var("COLORTERM").unwrap_or_else(|_| "unknown".to_string());
-        
+
         // For Warp terminal and other terminals that may have issues with background colors
         if term_program.contains("WarpTerminal") || term_program.contains("Warp") {
             // Warp-specific styling - use bright colors and modifiers without RGB for better compatibility
@@ -214,7 +219,7 @@ impl App {
     fn get_selection_symbol(&self) -> &'static str {
         let term_program = std::env::var("TERM_PROGRAM").unwrap_or_else(|_| "unknown".to_string());
         let term = std::env::var("TERM").unwrap_or_else(|_| "unknown".to_string());
-        
+
         // Use different symbols for different terminals for better visibility
         if term_program.contains("WarpTerminal") || term_program.contains("Warp") {
             "===> "
@@ -241,7 +246,7 @@ impl App {
         let term = std::env::var("TERM").unwrap_or_else(|_| "unknown".to_string());
         let term_program = std::env::var("TERM_PROGRAM").unwrap_or_else(|_| "unknown".to_string());
         let colorterm = std::env::var("COLORTERM").unwrap_or_else(|_| "unknown".to_string());
-        
+
         format!(
             "Terminal Detection:\n  TERM: {}\n  TERM_PROGRAM: {}\n  COLORTERM: {}\n  Selection Symbol: '{}'\n",
             term, term_program, colorterm, self.get_selection_symbol()
@@ -326,24 +331,38 @@ fn get_tmux_sessions_with_system(system: &mut System) -> Result<Vec<TmuxSession>
     get_tmux_sessions_with_executor_and_system(&DefaultTmuxExecutor, system)
 }
 
+#[allow(dead_code)]
 fn get_tmux_sessions_with_executor(executor: &dyn TmuxExecutor) -> Result<Vec<TmuxSession>> {
     let mut system = System::new_all();
     system.refresh_all();
     get_tmux_sessions_with_executor_and_system(executor, &mut system)
 }
 
-fn get_tmux_sessions_with_executor_and_system(executor: &dyn TmuxExecutor, system: &mut System) -> Result<Vec<TmuxSession>> {
+fn get_tmux_sessions_with_executor_and_system(
+    executor: &dyn TmuxExecutor,
+    system: &mut System,
+) -> Result<Vec<TmuxSession>> {
     let output = executor.execute_command(&["list-sessions", "-F", "#{session_name}:#{session_windows}:#{session_attached}:#{session_created}:#{session_activity}"])?;
 
     if !output.status.success() {
-        if output.stderr.starts_with(b"no server running") {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        // Handle various tmux error messages for no server
+        if stderr.contains("no server running")
+            || stderr.contains("no sessions")
+            || stderr.contains("no current client")
+            || stderr.contains("can't find session")
+            || stderr.contains("server not found")
+            || stderr.contains("error connecting to")
+            || stderr.contains("No such file or directory")
+            || stderr.contains("server exited unexpectedly")
+        {
             return Ok(Vec::new());
         }
-        return Err(anyhow::anyhow!("tmux command failed"));
+        return Err(anyhow::anyhow!("tmux command failed: {}", stderr.trim()));
     }
 
     let mut sessions = parse_tmux_sessions(&String::from_utf8_lossy(&output.stdout));
-    
+
     // Enrich sessions with process and resource information
     for session in &mut sessions {
         enrich_session_info(session, executor, system);
@@ -374,35 +393,47 @@ fn parse_tmux_sessions(output: &str) -> Vec<TmuxSession> {
         .collect()
 }
 
-fn enrich_session_info(session: &mut TmuxSession, executor: &dyn TmuxExecutor, system: &mut System) {
+fn enrich_session_info(
+    session: &mut TmuxSession,
+    executor: &dyn TmuxExecutor,
+    system: &mut System,
+) {
     // Get tmux server PID
-    if let Ok(output) = executor.execute_command(&["list-sessions", "-t", &session.name, "-F", "#{session_id}"]) {
+    if let Ok(output) =
+        executor.execute_command(&["list-sessions", "-t", &session.name, "-F", "#{session_id}"])
+    {
         if output.status.success() {
             let _session_id = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            
+
             // Try to find the tmux process for this session
             system.refresh_processes();
             let mut total_memory = 0.0;
             let mut total_cpu = 0.0;
             let mut process_count = 0;
-            
+
             for (pid, process) in system.processes() {
                 let cmd = process.cmd();
-                if cmd.iter().any(|arg| arg.contains("tmux") || arg.contains(&session.name)) {
+                if cmd
+                    .iter()
+                    .any(|arg| arg.contains("tmux") || arg.contains(&session.name))
+                {
                     total_memory += process.memory() as f64 / 1024.0 / 1024.0; // Convert to MB
                     total_cpu += process.cpu_usage();
                     process_count += 1;
-                    
+
                     if session.process_info.is_none() {
                         session.process_info = Some(ProcessInfo {
                             pid: Some(pid.as_u32()),
                             command: cmd.join(" "),
-                            user: process.user_id().map(|u| u.to_string()).unwrap_or_else(|| "unknown".to_string()),
+                            user: process
+                                .user_id()
+                                .map(|u| u.to_string())
+                                .unwrap_or_else(|| "unknown".to_string()),
                         });
                     }
                 }
             }
-            
+
             if process_count > 0 {
                 session.resource_info = Some(ResourceInfo {
                     memory_mb: total_memory,
@@ -411,7 +442,7 @@ fn enrich_session_info(session: &mut TmuxSession, executor: &dyn TmuxExecutor, s
             }
         }
     }
-    
+
     // Fallback process info if not found
     if session.process_info.is_none() {
         session.process_info = Some(ProcessInfo {
@@ -420,7 +451,7 @@ fn enrich_session_info(session: &mut TmuxSession, executor: &dyn TmuxExecutor, s
             user: std::env::var("USER").unwrap_or_else(|_| "unknown".to_string()),
         });
     }
-    
+
     // Fallback resource info if not found
     if session.resource_info.is_none() {
         session.resource_info = Some(ResourceInfo {
@@ -432,7 +463,7 @@ fn enrich_session_info(session: &mut TmuxSession, executor: &dyn TmuxExecutor, s
 
 fn list_sessions() -> Result<()> {
     let sessions = get_tmux_sessions()?;
-    
+
     if sessions.is_empty() {
         println!("No tmux sessions found.");
         return Ok(());
@@ -441,10 +472,17 @@ fn list_sessions() -> Result<()> {
     println!("Active tmux sessions:");
     println!("{:<20} {:<10} {:<10}", "Name", "Windows", "Status");
     println!("{}", "-".repeat(40));
-    
+
     for session in sessions {
-        let status = if session.attached { "attached" } else { "detached" };
-        println!("{:<20} {:<10} {:<10}", session.name, session.windows, status);
+        let status = if session.attached {
+            "attached"
+        } else {
+            "detached"
+        };
+        println!(
+            "{:<20} {:<10} {:<10}",
+            session.name, session.windows, status
+        );
     }
 
     Ok(())
@@ -452,7 +490,7 @@ fn list_sessions() -> Result<()> {
 
 fn attach_session(session_name: Option<String>) -> Result<()> {
     let sessions = get_tmux_sessions()?;
-    
+
     let target_session = match session_name {
         Some(name) => name,
         None => {
@@ -464,12 +502,15 @@ fn attach_session(session_name: Option<String>) -> Result<()> {
     };
 
     let status = Command::new("tmux")
-        .args(&["attach-session", "-t", &target_session])
+        .args(["attach-session", "-t", &target_session])
         .status()
         .context("Failed to execute tmux attach command")?;
 
     if !status.success() {
-        return Err(anyhow::anyhow!("Failed to attach to session '{}'. Session may not exist.", target_session));
+        return Err(anyhow::anyhow!(
+            "Failed to attach to session '{}'. Session may not exist.",
+            target_session
+        ));
     }
 
     Ok(())
@@ -478,42 +519,43 @@ fn attach_session(session_name: Option<String>) -> Result<()> {
 fn new_session(name: Option<String>) -> Result<()> {
     let mut cmd = Command::new("tmux");
     cmd.arg("new-session");
-    
+
     if let Some(session_name) = name {
-        cmd.args(&["-s", &session_name]);
+        cmd.args(["-s", &session_name]);
     }
-    
-    let status = cmd.status()
+
+    let status = cmd
+        .status()
         .context("Failed to execute tmux new-session command")?;
 
     if !status.success() {
-        return Err(anyhow::anyhow!("Failed to create new tmux session. Session name may already exist."));
+        return Err(anyhow::anyhow!(
+            "Failed to create new tmux session. Session name may already exist."
+        ));
     }
 
     Ok(())
 }
 
 fn kill_session(session_name: Option<String>) -> Result<()> {
-    let sessions = get_tmux_sessions()?;
-    
     let target_session = match session_name {
         Some(name) => name,
         None => {
-            if sessions.is_empty() {
-                return Err(anyhow::anyhow!("No tmux sessions found"));
-            }
             // In interactive mode, we'd select, but in CLI mode, refuse to kill without name
             return Err(anyhow::anyhow!("Please specify a session name to kill"));
         }
     };
 
     let status = Command::new("tmux")
-        .args(&["kill-session", "-t", &target_session])
+        .args(["kill-session", "-t", &target_session])
         .status()
         .context("Failed to execute tmux kill-session command")?;
 
     if !status.success() {
-        return Err(anyhow::anyhow!("Failed to kill session '{}'. Session may not exist.", target_session));
+        return Err(anyhow::anyhow!(
+            "Failed to kill session '{}'. Session may not exist.",
+            target_session
+        ));
     }
 
     println!("Killed session: {}", target_session);
@@ -522,12 +564,16 @@ fn kill_session(session_name: Option<String>) -> Result<()> {
 
 fn rename_session(old_name: &str, new_name: &str) -> Result<()> {
     let status = Command::new("tmux")
-        .args(&["rename-session", "-t", old_name, new_name])
+        .args(["rename-session", "-t", old_name, new_name])
         .status()
         .context("Failed to execute tmux rename command")?;
 
     if !status.success() {
-        return Err(anyhow::anyhow!("Failed to rename session '{}' to '{}'. Session may not exist.", old_name, new_name));
+        return Err(anyhow::anyhow!(
+            "Failed to rename session '{}' to '{}'. Session may not exist.",
+            old_name,
+            new_name
+        ));
     }
 
     println!("Renamed session '{}' to '{}'", old_name, new_name);
@@ -540,14 +586,16 @@ fn restore_sessions(file: Option<PathBuf>) -> Result<()> {
         PathBuf::from(home).join(".cmux_snapshot.json")
     });
 
-    let content = fs::read_to_string(&snapshot_path)
-        .context("Failed to read snapshot file")?;
-    
-    let snapshot: SessionSnapshot = serde_json::from_str(&content)
-        .context("Failed to parse snapshot file")?;
+    let content = fs::read_to_string(&snapshot_path).context("Failed to read snapshot file")?;
 
-    println!("Restoring {} sessions from snapshot...", snapshot.sessions.len());
-    
+    let snapshot: SessionSnapshot =
+        serde_json::from_str(&content).context("Failed to parse snapshot file")?;
+
+    println!(
+        "Restoring {} sessions from snapshot...",
+        snapshot.sessions.len()
+    );
+
     for session in snapshot.sessions {
         if get_tmux_sessions()?.iter().any(|s| s.name == session.name) {
             println!("Session '{}' already exists, skipping...", session.name);
@@ -555,10 +603,10 @@ fn restore_sessions(file: Option<PathBuf>) -> Result<()> {
         }
 
         Command::new("tmux")
-            .args(&["new-session", "-d", "-s", &session.name])
+            .args(["new-session", "-d", "-s", &session.name])
             .status()
             .context("Failed to create session")?;
-        
+
         println!("Restored session: {}", session.name);
     }
 
@@ -574,7 +622,7 @@ fn save_snapshot() -> Result<PathBuf> {
 
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
     let snapshot_path = PathBuf::from(home).join(".cmux_snapshot.json");
-    
+
     let json = serde_json::to_string_pretty(&snapshot)?;
     fs::write(&snapshot_path, json)?;
 
@@ -584,7 +632,7 @@ fn save_snapshot() -> Result<PathBuf> {
 fn load_aliases() -> Result<HashMap<String, String>> {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
     let alias_path = PathBuf::from(home).join(".cmux_aliases.json");
-    
+
     if !alias_path.exists() {
         return Ok(HashMap::new());
     }
@@ -597,7 +645,7 @@ fn load_aliases() -> Result<HashMap<String, String>> {
 fn save_aliases(aliases: &HashMap<String, String>) -> Result<()> {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
     let alias_path = PathBuf::from(home).join(".cmux_aliases.json");
-    
+
     let json = serde_json::to_string_pretty(aliases)?;
     fs::write(&alias_path, json)?;
     Ok(())
@@ -610,7 +658,10 @@ fn manage_alias(name: Option<String>, session: Option<String>) -> Result<()> {
         (Some(alias_name), Some(session_name)) => {
             aliases.insert(alias_name.clone(), session_name.clone());
             save_aliases(&aliases)?;
-            println!("Created alias '{}' for session '{}'", alias_name, session_name);
+            println!(
+                "Created alias '{}' for session '{}'",
+                alias_name, session_name
+            );
         }
         (Some(alias_name), None) => {
             if let Some(session_name) = aliases.get(&alias_name) {
@@ -639,13 +690,12 @@ fn manage_alias(name: Option<String>, session: Option<String>) -> Result<()> {
 
 fn show_session_info(session_name: Option<String>) -> Result<()> {
     let sessions = get_tmux_sessions()?;
-    
+
     let target_session = match session_name {
-        Some(name) => {
-            sessions.into_iter()
-                .find(|s| s.name == name)
-                .ok_or_else(|| anyhow::anyhow!("Session '{}' not found", name))?
-        }
+        Some(name) => sessions
+            .into_iter()
+            .find(|s| s.name == name)
+            .ok_or_else(|| anyhow::anyhow!("Session '{}' not found", name))?,
         None => {
             if sessions.is_empty() {
                 return Err(anyhow::anyhow!("No tmux sessions found"));
@@ -657,13 +707,26 @@ fn show_session_info(session_name: Option<String>) -> Result<()> {
     println!("Session Information:");
     println!("  Name: {}", target_session.name);
     println!("  Windows: {}", target_session.windows);
-    println!("  Status: {}", if target_session.attached { "attached" } else { "detached" });
+    println!(
+        "  Status: {}",
+        if target_session.attached {
+            "attached"
+        } else {
+            "detached"
+        }
+    );
     println!("  Created: {}", target_session.created);
     println!("  Last Activity: {}", target_session.activity);
 
     // Get window details
     let output = Command::new("tmux")
-        .args(&["list-windows", "-t", &target_session.name, "-F", "#{window_index}: #{window_name} (#{window_panes} panes)"])
+        .args([
+            "list-windows",
+            "-t",
+            &target_session.name,
+            "-F",
+            "#{window_index}: #{window_name} (#{window_panes} panes)",
+        ])
         .output()?;
 
     if output.status.success() {
@@ -679,7 +742,7 @@ fn show_session_info(session_name: Option<String>) -> Result<()> {
 
 fn kill_all_sessions() -> Result<()> {
     let sessions = get_tmux_sessions()?;
-    
+
     if sessions.is_empty() {
         println!("No tmux sessions to kill.");
         return Ok(());
@@ -689,13 +752,13 @@ fn kill_all_sessions() -> Result<()> {
     for session in &sessions {
         println!("  - {}", session.name);
     }
-    
+
     print!("\nAre you sure? (y/N): ");
     io::stdout().flush()?;
-    
+
     let mut input = String::new();
     io::stdin().read_line(&mut input)?;
-    
+
     if input.trim().to_lowercase() != "y" {
         println!("Cancelled.");
         return Ok(());
@@ -703,7 +766,7 @@ fn kill_all_sessions() -> Result<()> {
 
     for session in sessions {
         Command::new("tmux")
-            .args(&["kill-session", "-t", &session.name])
+            .args(["kill-session", "-t", &session.name])
             .status()?;
         println!("Killed: {}", session.name);
     }
@@ -778,7 +841,11 @@ fn draw_top_ui(f: &mut Frame, app: &App) {
         chrono::Local::now().format("%H:%M:%S")
     );
     let header = Paragraph::new(header_text)
-        .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+        .style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )
         .alignment(Alignment::Center)
         .block(Block::default().borders(Borders::ALL));
     f.render_widget(header, chunks[0]);
@@ -790,21 +857,26 @@ fn draw_top_ui(f: &mut Frame, app: &App) {
         .map(|s| {
             let status = if s.attached { "●" } else { "○" };
             let (memory_info, cpu_info) = if let Some(ref resource) = s.resource_info {
-                (format!("{:.1}MB", resource.memory_mb), format!("{:.1}%", resource.cpu_percent))
+                (
+                    format!("{:.1}MB", resource.memory_mb),
+                    format!("{:.1}%", resource.cpu_percent),
+                )
             } else {
                 ("N/A".to_string(), "N/A".to_string())
             };
-            
+
             let user = if let Some(ref process) = s.process_info {
                 &process.user
             } else {
                 "unknown"
             };
-            
+
             let content = Line::from(vec![
                 Span::styled(
                     "▶ ",
-                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(
                     status,
@@ -813,7 +885,9 @@ fn draw_top_ui(f: &mut Frame, app: &App) {
                 Span::raw(" "),
                 Span::styled(
                     format!("{:<12}", s.name),
-                    Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD),
                 ),
                 Span::raw(" "),
                 Span::styled(
@@ -831,10 +905,7 @@ fn draw_top_ui(f: &mut Frame, app: &App) {
                     Style::default().fg(Color::Magenta),
                 ),
                 Span::raw(" "),
-                Span::styled(
-                    format!("{:<8}", user),
-                    Style::default().fg(Color::Gray),
-                ),
+                Span::styled(format!("{:<8}", user), Style::default().fg(Color::Gray)),
             ]);
             ListItem::new(content)
         })
@@ -846,7 +917,7 @@ fn draw_top_ui(f: &mut Frame, app: &App) {
         let term = std::env::var("TERM").unwrap_or_else(|_| "unknown".to_string());
         let term_program = std::env::var("TERM_PROGRAM").unwrap_or_else(|_| "unknown".to_string());
         let colorterm = std::env::var("COLORTERM").unwrap_or_else(|_| "unknown".to_string());
-        
+
         // For Warp terminal and other terminals that may have issues with background colors
         if term_program.contains("WarpTerminal") || term_program.contains("Warp") {
             Style::default()
@@ -870,11 +941,11 @@ fn draw_top_ui(f: &mut Frame, app: &App) {
                 .add_modifier(Modifier::REVERSED)
         }
     }
-    
+
     fn get_top_ui_selection_symbol() -> &'static str {
         let term_program = std::env::var("TERM_PROGRAM").unwrap_or_else(|_| "unknown".to_string());
         let term = std::env::var("TERM").unwrap_or_else(|_| "unknown".to_string());
-        
+
         if term_program.contains("WarpTerminal") || term_program.contains("Warp") {
             "===> "
         } else if term_program.contains("iTerm") {
@@ -885,12 +956,12 @@ fn draw_top_ui(f: &mut Frame, app: &App) {
             "► "
         }
     }
-    
+
     let sessions_list = List::new(sessions)
         .block(Block::default().borders(Borders::ALL).title(title))
         .highlight_style(get_top_ui_highlight_style())
         .highlight_symbol(get_top_ui_selection_symbol());
-    
+
     f.render_widget(sessions_list, chunks[1]);
 
     // Help
@@ -907,8 +978,9 @@ fn run_tui() -> Result<()> {
     if !std::io::stdout().is_terminal() {
         return Err(anyhow::anyhow!("cmux requires an interactive terminal. Try running a specific command like 'cmux ls' or 'cmux --help'"));
     }
-    
-    enable_raw_mode().context("Failed to enable raw mode. Make sure you're running in a supported terminal.")?;
+
+    enable_raw_mode()
+        .context("Failed to enable raw mode. Make sure you're running in a supported terminal.")?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
@@ -934,15 +1006,15 @@ fn run_tui() -> Result<()> {
                         DisableMouseCapture
                     )?;
                     terminal.show_cursor()?;
-                    
+
                     // Attach to session
                     attach_session(Some(name))?;
-                    
+
                     // Re-enter TUI mode after detaching
                     enable_raw_mode()?;
                     let mut new_stdout = io::stdout();
                     execute!(new_stdout, EnterAlternateScreen, EnableMouseCapture)?;
-                    
+
                     // Clear the screen and refresh the terminal
                     let backend = CrosstermBackend::new(new_stdout);
                     terminal = Terminal::new(backend)?;
@@ -975,7 +1047,7 @@ fn handle_input(app: &mut App, key: KeyEvent) -> Result<InputResult> {
     if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
         return Ok(InputResult::Quit);
     }
-    
+
     // Handle popup input if showing new session popup
     if app.show_new_session_popup {
         match key.code {
@@ -1002,7 +1074,7 @@ fn handle_input(app: &mut App, key: KeyEvent) -> Result<InputResult> {
         }
         return Ok(InputResult::Continue);
     }
-    
+
     // Normal input handling
     match key.code {
         KeyCode::Char('q') | KeyCode::Esc => return Ok(InputResult::Quit),
@@ -1060,17 +1132,22 @@ fn draw_ui(f: &mut Frame, app: &mut App, list_state: &mut ListState) {
 
     // Header
     let header = Paragraph::new("crabmux - Mobile-Friendly tmux Manager")
-        .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+        .style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )
         .alignment(Alignment::Center)
         .block(Block::default().borders(Borders::ALL));
     f.render_widget(header, chunks[0]);
 
     // Session list
     if app.sessions.is_empty() {
-        let empty_msg = Paragraph::new("No tmux sessions found.\nPress 'n' to create a new session.")
-            .style(Style::default().fg(Color::Gray))
-            .alignment(Alignment::Center)
-            .block(Block::default().borders(Borders::ALL).title("Sessions"));
+        let empty_msg =
+            Paragraph::new("No tmux sessions found.\nPress 'n' to create a new session.")
+                .style(Style::default().fg(Color::Gray))
+                .alignment(Alignment::Center)
+                .block(Block::default().borders(Borders::ALL).title("Sessions"));
         f.render_widget(empty_msg, chunks[1]);
     } else {
         let sessions: Vec<ListItem> = app
@@ -1079,28 +1156,41 @@ fn draw_ui(f: &mut Frame, app: &mut App, list_state: &mut ListState) {
             .enumerate()
             .map(|(i, s)| {
                 let status = if s.attached { "●" } else { "○" };
-                
+
                 // Get resource info
                 let (memory_info, cpu_info) = if let Some(ref resource) = s.resource_info {
-                    (format!("{:.1}MB", resource.memory_mb), format!("{:.1}%", resource.cpu_percent))
+                    (
+                        format!("{:.1}MB", resource.memory_mb),
+                        format!("{:.1}%", resource.cpu_percent),
+                    )
                 } else {
                     ("N/A".to_string(), "N/A".to_string())
                 };
-                
+
                 // Get user info
                 let user = if let Some(ref process) = s.process_info {
                     &process.user
                 } else {
                     "unknown"
                 };
-                
+
                 // Add selection indicator prefix for better visibility
                 let selection_prefix = app.get_selection_prefix(i == app.selected);
-                
+
                 let content = Line::from(vec![
                     Span::styled(
                         format!("{:<1}", selection_prefix),
-                        Style::default().fg(if i == app.selected { Color::Yellow } else { Color::DarkGray }).add_modifier(if i == app.selected { Modifier::BOLD } else { Modifier::empty() }),
+                        Style::default()
+                            .fg(if i == app.selected {
+                                Color::Yellow
+                            } else {
+                                Color::DarkGray
+                            })
+                            .add_modifier(if i == app.selected {
+                                Modifier::BOLD
+                            } else {
+                                Modifier::empty()
+                            }),
                     ),
                     Span::styled(
                         format!("{:<1}", status),
@@ -1109,31 +1199,55 @@ fn draw_ui(f: &mut Frame, app: &mut App, list_state: &mut ListState) {
                     Span::raw(" "),
                     Span::styled(
                         format!("{:<15}", s.name),
-                        Style::default().fg(
-                            if i == app.selected { Color::Yellow } else { Color::White }
-                        ).add_modifier(if i == app.selected { Modifier::BOLD | Modifier::UNDERLINED } else { Modifier::BOLD }),
+                        Style::default()
+                            .fg(if i == app.selected {
+                                Color::Yellow
+                            } else {
+                                Color::White
+                            })
+                            .add_modifier(if i == app.selected {
+                                Modifier::BOLD | Modifier::UNDERLINED
+                            } else {
+                                Modifier::BOLD
+                            }),
                     ),
                     Span::styled(
                         format!("{:>3}W", s.windows),
-                        Style::default().fg(if i == app.selected { Color::Yellow } else { Color::Yellow }),
+                        Style::default().fg(if i == app.selected {
+                            Color::Yellow
+                        } else {
+                            Color::White
+                        }),
                     ),
                     Span::raw(" "),
                     Span::styled(
                         format!("{:>8}", memory_info),
-                        Style::default().fg(if i == app.selected { Color::Yellow } else { Color::Cyan }),
+                        Style::default().fg(if i == app.selected {
+                            Color::Yellow
+                        } else {
+                            Color::Cyan
+                        }),
                     ),
                     Span::raw(" "),
                     Span::styled(
                         format!("{:>6}", cpu_info),
-                        Style::default().fg(if i == app.selected { Color::Yellow } else { Color::Magenta }),
+                        Style::default().fg(if i == app.selected {
+                            Color::Yellow
+                        } else {
+                            Color::Magenta
+                        }),
                     ),
                     Span::raw(" "),
                     Span::styled(
                         format!("{:<8}", user),
-                        Style::default().fg(if i == app.selected { Color::Yellow } else { Color::Gray }),
+                        Style::default().fg(if i == app.selected {
+                            Color::Yellow
+                        } else {
+                            Color::Gray
+                        }),
                     ),
                 ]);
-                
+
                 let mut item = ListItem::new(content);
                 if i == app.selected {
                     // Use terminal-aware highlighting
@@ -1148,7 +1262,7 @@ fn draw_ui(f: &mut Frame, app: &mut App, list_state: &mut ListState) {
             .block(Block::default().borders(Borders::ALL).title(title))
             .highlight_style(app.get_highlight_style())
             .highlight_symbol(app.get_selection_symbol());
-        
+
         list_state.select(Some(app.selected));
         f.render_stateful_widget(sessions_list, chunks[1], list_state);
     }
@@ -1161,9 +1275,7 @@ fn draw_ui(f: &mut Frame, app: &mut App, list_state: &mut ListState) {
             "d: Debug terminal    q/Esc/Ctrl+C: Quit  ?: Toggle help",
         ]
     } else {
-        vec![
-            "Navigate: ↑/↓  Attach: Enter  New: n  Kill: K  Debug: d  Quit: q/Ctrl+C  Help: ?",
-        ]
+        vec!["Navigate: ↑/↓  Attach: Enter  New: n  Kill: K  Debug: d  Quit: q/Ctrl+C  Help: ?"]
     };
 
     let help = Paragraph::new(help_text.join("\n"))
@@ -1172,7 +1284,7 @@ fn draw_ui(f: &mut Frame, app: &mut App, list_state: &mut ListState) {
         .wrap(Wrap { trim: true })
         .block(Block::default().borders(Borders::ALL).title("Controls"));
     f.render_widget(help, chunks[2]);
-    
+
     // Render popup if showing
     if app.show_new_session_popup {
         draw_new_session_popup(f, app);
@@ -1181,15 +1293,15 @@ fn draw_ui(f: &mut Frame, app: &mut App, list_state: &mut ListState) {
 
 fn draw_new_session_popup(f: &mut Frame, app: &App) {
     let popup_area = centered_rect(50, 20, f.size());
-    
+
     // Clear the area
     f.render_widget(Clear, popup_area);
-    
+
     let popup_block = Block::default()
         .title("New Session")
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Yellow));
-    
+
     let popup_chunks = Layout::default()
         .direction(Direction::Vertical)
         .margin(1)
@@ -1200,23 +1312,26 @@ fn draw_new_session_popup(f: &mut Frame, app: &App) {
             Constraint::Length(1),
         ])
         .split(popup_area);
-    
+
     f.render_widget(popup_block, popup_area);
-    
+
     let input_text = Paragraph::new("Enter session name (or press Enter for default):")
         .style(Style::default().fg(Color::White));
     f.render_widget(input_text, popup_chunks[0]);
-    
+
     let input_field = Paragraph::new(app.new_session_input.as_str())
-        .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
+        .style(
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )
         .block(Block::default().borders(Borders::ALL));
     f.render_widget(input_field, popup_chunks[1]);
-    
+
     let default_name = format!("Default: session-{}", chrono::Local::now().format("%H%M%S"));
-    let default_text = Paragraph::new(default_name)
-        .style(Style::default().fg(Color::Gray));
+    let default_text = Paragraph::new(default_name).style(Style::default().fg(Color::Gray));
     f.render_widget(default_text, popup_chunks[2]);
-    
+
     let help_text = Paragraph::new("Enter: Create  Esc: Cancel")
         .style(Style::default().fg(Color::Gray))
         .alignment(Alignment::Center);
@@ -1246,8 +1361,11 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::process::{ExitStatus, Output};
+    #[cfg(unix)]
     use std::os::unix::process::ExitStatusExt;
+    #[cfg(windows)]
+    use std::os::windows::process::ExitStatusExt;
+    use std::process::{ExitStatus, Output};
 
     // Mock tmux executor for testing
     struct MockTmuxExecutor {
@@ -1273,7 +1391,8 @@ mod tests {
 
         fn add_error_response(&mut self, args: Vec<&str>) {
             let key = args.join(" ");
-            self.responses.insert(key, Err(anyhow::anyhow!("Command failed")));
+            self.responses
+                .insert(key, Err(anyhow::anyhow!("Command failed")));
         }
     }
 
@@ -1292,17 +1411,17 @@ mod tests {
     fn test_parse_tmux_sessions() {
         let output = "main:3:1:1234567890:1234567890\ndev:1:0:1234567891:1234567891\ntest:2:0:1234567892:1234567892";
         let sessions = parse_tmux_sessions(output);
-        
+
         assert_eq!(sessions.len(), 3);
-        
+
         assert_eq!(sessions[0].name, "main");
         assert_eq!(sessions[0].windows, 3);
         assert_eq!(sessions[0].attached, true);
-        
+
         assert_eq!(sessions[1].name, "dev");
         assert_eq!(sessions[1].windows, 1);
         assert_eq!(sessions[1].attached, false);
-        
+
         assert_eq!(sessions[2].name, "test");
         assert_eq!(sessions[2].windows, 2);
         assert_eq!(sessions[2].attached, false);
@@ -1483,18 +1602,16 @@ mod tests {
 
     #[test]
     fn test_session_snapshot_serialization() {
-        let sessions = vec![
-            TmuxSession {
-                name: "main".to_string(),
-                windows: 3,
-                attached: true,
-                created: "123".to_string(),
-                activity: "456".to_string(),
-                process_info: None,
-                resource_info: None,
-            },
-        ];
-        
+        let sessions = vec![TmuxSession {
+            name: "main".to_string(),
+            windows: 3,
+            attached: true,
+            created: "123".to_string(),
+            activity: "456".to_string(),
+            process_info: None,
+            resource_info: None,
+        }];
+
         let snapshot = SessionSnapshot {
             sessions: sessions.clone(),
             timestamp: "2024-01-01T00:00:00".to_string(),
@@ -1521,12 +1638,12 @@ mod tests {
         let result3 = InputResult::AttachSession("test".to_string());
 
         match result1 {
-            InputResult::Continue => {},
+            InputResult::Continue => {}
             _ => panic!("Expected Continue"),
         }
 
         match result2 {
-            InputResult::Quit => {},
+            InputResult::Quit => {}
             _ => panic!("Expected Quit"),
         }
 

@@ -2,6 +2,15 @@
 name = "crabmux"
 version = "0.1.0"
 edition = "2021"
+authors = ["Madhava Jay"]
+description = "A modern tmux session manager with an interactive TUI"
+repository = "https://github.com/madhavajay/crabmux"
+homepage = "https://github.com/madhavajay/crabmux"
+documentation = "https://github.com/madhavajay/crabmux"
+readme = "README.md"
+license = "Apache-2.0"
+keywords = ["tmux", "terminal", "tui", "session-manager", "cli"]
+categories = ["command-line-utilities", "development-tools"]
 
 [[bin]]
 name = "cmux"

@@ -79,35 +79,77 @@ install_crabmux() {
     local version="$2"
     local install_dir="${3:-/usr/local/bin}"
     
-    # Construct download URL
-    local binary_name="cmux-${platform}"
-    if [[ "$platform" == *"windows"* ]]; then
-        binary_name="${binary_name}.exe"
-    fi
+    # Map platform to target architecture
+    local target
+    case "$platform" in
+        linux-x86_64)   target="x86_64-unknown-linux-musl" ;;
+        linux-aarch64)  target="aarch64-unknown-linux-musl" ;;
+        macos-x86_64)   target="x86_64-apple-darwin" ;;
+        macos-aarch64)  target="aarch64-apple-darwin" ;;
+        windows-x86_64) target="x86_64-pc-windows-msvc" ;;
+        windows-aarch64) target="aarch64-pc-windows-msvc" ;;
+        *)
+            print_error "Unsupported platform: $platform"
+            exit 1
+            ;;
+    esac
     
-    local download_url="https://github.com/madhavajay/crabmux/releases/download/${version}/${binary_name}"
-    local temp_file="/tmp/${binary_name}"
+    # Construct download URL for the tarball/zip
+    local archive_name="crabmux-${target}"
+    local archive_ext="tar.gz"
+    if [[ "$platform" == *"windows"* ]]; then
+        archive_ext="zip"
+    fi
+    archive_name="${archive_name}.${archive_ext}"
+    
+    local download_url="https://github.com/madhavajay/crabmux/releases/download/${version}/${archive_name}"
+    local temp_dir="/tmp/crabmux-install-$$"
+    mkdir -p "$temp_dir"
     
     print_status "Downloading crabmux ${version} for ${platform}..."
     
-    # Download the binary
+    # Download the archive
+    local temp_archive="${temp_dir}/${archive_name}"
     if command -v curl >/dev/null 2>&1; then
-        curl -L -o "$temp_file" "$download_url"
+        curl -L -o "$temp_archive" "$download_url"
     elif command -v wget >/dev/null 2>&1; then
-        wget -O "$temp_file" "$download_url"
+        wget -O "$temp_archive" "$download_url"
     else
         print_error "Neither curl nor wget is available."
+        rm -rf "$temp_dir"
         exit 1
     fi
     
     # Verify download
-    if [[ ! -f "$temp_file" ]]; then
-        print_error "Failed to download crabmux binary"
+    if [[ ! -f "$temp_archive" ]]; then
+        print_error "Failed to download crabmux archive"
+        rm -rf "$temp_dir"
+        exit 1
+    fi
+    
+    # Extract the binary
+    print_status "Extracting crabmux..."
+    cd "$temp_dir"
+    if [[ "$archive_ext" == "tar.gz" ]]; then
+        tar -xzf "$archive_name"
+    elif [[ "$archive_ext" == "zip" ]]; then
+        unzip -q "$archive_name"
+    fi
+    
+    # Find the binary
+    local binary_name="cmux"
+    if [[ "$platform" == *"windows"* ]]; then
+        binary_name="cmux.exe"
+    fi
+    
+    if [[ ! -f "$binary_name" ]]; then
+        print_error "Binary not found in archive"
+        rm -rf "$temp_dir"
         exit 1
     fi
     
     # Make executable
-    chmod +x "$temp_file"
+    chmod +x "$binary_name"
     
     # Install to system path
     local target_file="${install_dir}/cmux"
@@ -116,12 +158,16 @@ install_crabmux() {
     
     # Try to install to system directory
     if [[ -w "$install_dir" ]]; then
-        mv "$temp_file" "$target_file"
+        mv "$binary_name" "$target_file"
     else
         # Use sudo if directory is not writable
         print_status "Requesting sudo permission to install to ${install_dir}..."
-        sudo mv "$temp_file" "$target_file"
+        sudo mv "$binary_name" "$target_file"
     fi
+    
+    # Cleanup
+    cd - >/dev/null
+    rm -rf "$temp_dir"
     
     print_success "crabmux installed successfully!"
 }

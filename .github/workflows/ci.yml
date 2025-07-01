@@ -20,6 +20,17 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Install tmux
+        run: |
+          if [[ "${{ matrix.os }}" == "ubuntu-latest" ]]; then
+            sudo apt-get update && sudo apt-get install -y tmux
+          elif [[ "${{ matrix.os }}" == "macos-latest" ]]; then
+            brew install tmux
+          elif [[ "${{ matrix.os }}" == "windows-latest" ]]; then
+            echo "Skipping tmux installation on Windows"
+          fi
+        shell: bash
+
       - name: Setup Rust
         uses: actions-rs/toolchain@v1
         with:

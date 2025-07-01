@@ -2,102 +2,260 @@ name: Release
 
 on:
   push:
-    tags:
-      - 'v*'
+    branches:
+      - main
   workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  create-release:
+  test:
+    name: Test
     runs-on: ubuntu-latest
-    outputs:
-      upload_url: ${{ steps.create_release.outputs.upload_url }}
-      release_id: ${{ steps.create_release.outputs.id }}
     steps:
-      - name: Create Release
-        id: create_release
-        uses: actions/create-release@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/checkout@v4
+      
+      - name: Install Rust
+        uses: actions-rs/toolchain@v1
         with:
-          tag_name: ${{ github.ref }}
-          release_name: Release ${{ github.ref }}
-          draft: false
-          prerelease: false
+          toolchain: stable
+          override: true
+      
+      - name: Run tests
+        run: cargo test --all-features
+
+  check-version:
+    name: Check if version needs bump
+    runs-on: ubuntu-latest
+    needs: test
+    outputs:
+      needs_bump: ${{ steps.check.outputs.needs_bump }}
+      current_version: ${{ steps.check.outputs.current_version }}
+      new_version: ${{ steps.check.outputs.new_version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      
+      - name: Check version
+        id: check
+        run: |
+          # Get current version from Cargo.toml
+          CURRENT_VERSION=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
+          echo "current_version=$CURRENT_VERSION" >> $GITHUB_OUTPUT
+          
+          # Check if this version has been published already
+          if git tag | grep -q "v$CURRENT_VERSION"; then
+            echo "Version $CURRENT_VERSION already exists, bumping patch version"
+            IFS='.' read -ra VERSION_PARTS <<< "$CURRENT_VERSION"
+            MAJOR="${VERSION_PARTS[0]}"
+            MINOR="${VERSION_PARTS[1]}"
+            PATCH="${VERSION_PARTS[2]}"
+            NEW_PATCH=$((PATCH + 1))
+            NEW_VERSION="$MAJOR.$MINOR.$NEW_PATCH"
+            echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT
+            echo "needs_bump=true" >> $GITHUB_OUTPUT
+          else
+            echo "Version $CURRENT_VERSION is new"
+            echo "new_version=$CURRENT_VERSION" >> $GITHUB_OUTPUT
+            echo "needs_bump=false" >> $GITHUB_OUTPUT
+          fi
+
+  bump-version:
+    name: Bump version if needed
+    runs-on: ubuntu-latest
+    needs: check-version
+    if: needs.check-version.outputs.needs_bump == 'true'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+      
+      - name: Update version in Cargo.toml
+        run: |
+          sed -i 's/^version = .*/version = "${{ needs.check-version.outputs.new_version }}"/' Cargo.toml
+      
+      - name: Commit version bump
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email github-actions[bot]@users.noreply.github.com
+          git add Cargo.toml
+          git commit -m "chore: bump version to ${{ needs.check-version.outputs.new_version }}"
+          git push
 
   build:
-    needs: create-release
+    name: Build ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
+    needs: [check-version, bump-version]
+    if: always() && needs.check-version.result == 'success'
     strategy:
       matrix:
         include:
           # Linux
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            name: cmux-linux-x86_64
+            binary: cmux
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            binary: cmux
           - os: ubuntu-latest
             target: aarch64-unknown-linux-gnu
-            name: cmux-linux-aarch64
+            binary: cmux
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-musl
+            binary: cmux
+          
           # macOS
           - os: macos-latest
             target: x86_64-apple-darwin
-            name: cmux-macos-x86_64
+            binary: cmux
           - os: macos-latest
             target: aarch64-apple-darwin
-            name: cmux-macos-aarch64
+            binary: cmux
+          
           # Windows
           - os: windows-latest
             target: x86_64-pc-windows-msvc
-            name: cmux-windows-x86_64.exe
+            binary: cmux.exe
           - os: windows-latest
             target: aarch64-pc-windows-msvc
-            name: cmux-windows-aarch64.exe
+            binary: cmux.exe
 
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Setup Rust
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      
+      - name: Install Rust
         uses: actions-rs/toolchain@v1
         with:
           toolchain: stable
           target: ${{ matrix.target }}
           override: true
-
+      
       - name: Install cross-compilation tools
-        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        if: matrix.os == 'ubuntu-latest'
         run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu
-
+          if [[ "${{ matrix.target }}" == "x86_64-unknown-linux-musl" ]]; then
+            sudo apt-get update
+            sudo apt-get install -y musl-tools
+          elif [[ "${{ matrix.target }}" == "aarch64-unknown-linux-gnu" ]]; then
+            sudo apt-get update
+            sudo apt-get install -y gcc-aarch64-linux-gnu
+          elif [[ "${{ matrix.target }}" == "aarch64-unknown-linux-musl" ]]; then
+            sudo apt-get update
+            sudo apt-get install -y musl-tools
+            mkdir -p ~/.cargo
+            echo '[target.aarch64-unknown-linux-musl]' >> ~/.cargo/config
+            echo 'linker = "aarch64-linux-gnu-gcc"' >> ~/.cargo/config
+            sudo apt-get install -y gcc-aarch64-linux-gnu
+          fi
+      
       - name: Build
         uses: actions-rs/cargo@v1
         with:
+          use-cross: ${{ matrix.os == 'ubuntu-latest' && (contains(matrix.target, 'aarch64') || contains(matrix.target, 'musl')) }}
           command: build
           args: --release --target ${{ matrix.target }}
-        env:
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
-
-      - name: Prepare artifact (Unix)
-        if: runner.os != 'Windows'
+      
+      - name: Package binary
+        shell: bash
         run: |
-          cp target/${{ matrix.target }}/release/cmux ${{ matrix.name }}
-          strip ${{ matrix.name }} || true
-          chmod +x ${{ matrix.name }}
+          cd target/${{ matrix.target }}/release
+          if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
+            7z a ../../../crabmux-${{ matrix.target }}.zip ${{ matrix.binary }}
+          else
+            tar czf ../../../crabmux-${{ matrix.target }}.tar.gz ${{ matrix.binary }}
+          fi
+          cd -
+      
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: crabmux-${{ matrix.target }}
+          path: |
+            crabmux-${{ matrix.target }}.tar.gz
+            crabmux-${{ matrix.target }}.zip
 
-      - name: Prepare artifact (Windows)
-        if: runner.os == 'Windows'
+  publish-crate:
+    name: Publish to crates.io
+    runs-on: ubuntu-latest
+    needs: [build, check-version]
+    if: always() && needs.build.result == 'success'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      
+      - name: Install Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          override: true
+      
+      - name: Publish to crates.io
+        run: cargo publish --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        continue-on-error: true
+
+  create-release:
+    name: Create GitHub Release
+    runs-on: ubuntu-latest
+    needs: [build, check-version, publish-crate]
+    if: always() && needs.build.result == 'success'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      
+      - name: Get final version
+        id: version
         run: |
-          cp target/${{ matrix.target }}/release/cmux.exe ${{ matrix.name }}
-
-      - name: Upload Release Asset
-        uses: actions/upload-release-asset@v1
+          VERSION=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+      
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      
+      - name: Create Release
+        id: create_release
+        uses: actions/create-release@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          upload_url: ${{ needs.create-release.outputs.upload_url }}
-          asset_path: ${{ matrix.name }}
-          asset_name: ${{ matrix.name }}
-          asset_content_type: application/octet-stream
+          tag_name: v${{ steps.version.outputs.version }}
+          release_name: Release v${{ steps.version.outputs.version }}
+          draft: false
+          prerelease: false
+          body: |
+            # Crabmux v${{ steps.version.outputs.version }}
+            
+            ## Installation
+            
+            ### Using curl (macOS/Linux)
+            ```bash
+            curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/main/install.sh | sh
+            ```
+            
+            ### Using Cargo
+            ```bash
+            cargo install crabmux
+            ```
+            
+            ### Manual Download
+            Download the appropriate binary for your platform from the assets below.
+      
+      - name: Upload Release Assets
+        run: |
+          for file in artifacts/*/*.{tar.gz,zip}; do
+            if [ -f "$file" ]; then
+              asset_name=$(basename "$file")
+              echo "Uploading $asset_name"
+              gh release upload v${{ steps.version.outputs.version }} "$file" \
+                --repo ${{ github.repository }}
+            fi
+          done
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
