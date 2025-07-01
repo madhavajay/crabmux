@@ -1,0 +1,36 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cargo:*)",
+      "Bash(ls:*)",
+      "Bash(./target/release/cmux --help)",
+      "Bash(mkdir:*)",
+      "Bash(chmod:*)",
+      "Bash(/Users/madhavajay/crabmux/crabmux/run_tests.sh:*)",
+      "Bash(./target/debug/cmux --help)",
+      "Bash(rustc:*)",
+      "Bash(timeout:*)",
+      "Bash(echo:*)",
+      "Bash(./target/debug/cmux:*)",
+      "Bash(rm:*)",
+      "Bash(tmux kill-session:*)",
+      "Bash(true)",
+      "Bash(./target/release/cmux:*)",
+      "Bash(rg:*)",
+      "Bash(RUST_BACKTRACE=1 cargo run 2>&1)",
+      "Bash(RUST_BACKTRACE=1 cargo test test_command_order -- --nocapture 2>&1)",
+      "Bash(RUST_BACKTRACE=1 ./target/debug/cmux 2>&1)",
+      "Bash(script:*)",
+      "Bash(mv:*)",
+      "Bash(pngcrush:*)",
+      "Bash(find:*)",
+      "Bash(touch:*)",
+      "Bash(gh pr view:*)",
+      "Bash(gh pr checks:*)",
+      "Bash(gh run view:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)"
+    ],
+    "deny": []
+  }
+}

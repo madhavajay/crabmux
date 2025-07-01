@@ -6,7 +6,7 @@ mod parsing_tests {
     // We need to duplicate the parsing function here since it's not exported
     // In a real implementation, you'd want to make this function public for testing
     use serde::{Deserialize, Serialize};
-    
+
     #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
     struct TmuxSession {
         name: String,
@@ -15,7 +15,7 @@ mod parsing_tests {
         created: String,
         activity: String,
     }
-    
+
     fn parse_tmux_sessions(output: &str) -> Vec<TmuxSession> {
         output
             .lines()
@@ -40,7 +40,7 @@ mod parsing_tests {
     fn test_parse_single_session() {
         let output = "main:3:1:1640995200:1640995200";
         let sessions = parse_tmux_sessions(output);
-        
+
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].name, "main");
         assert_eq!(sessions[0].windows, 3);
@@ -53,15 +53,15 @@ mod parsing_tests {
     fn test_parse_multiple_sessions() {
         let output = "main:3:1:1640995200:1640995200\ndev:1:0:1640995210:1640995210\ntest:2:0:1640995220:1640995220";
         let sessions = parse_tmux_sessions(output);
-        
+
         assert_eq!(sessions.len(), 3);
-        
+
         assert_eq!(sessions[0].name, "main");
         assert_eq!(sessions[0].attached, true);
-        
+
         assert_eq!(sessions[1].name, "dev");
         assert_eq!(sessions[1].attached, false);
-        
+
         assert_eq!(sessions[2].name, "test");
         assert_eq!(sessions[2].attached, false);
     }
@@ -70,7 +70,7 @@ mod parsing_tests {
     fn test_parse_session_with_special_characters() {
         let output = "session-with-dashes:1:0:123:456\nsession_with_underscores:2:1:789:012";
         let sessions = parse_tmux_sessions(output);
-        
+
         assert_eq!(sessions.len(), 2);
         assert_eq!(sessions[0].name, "session-with-dashes");
         assert_eq!(sessions[1].name, "session_with_underscores");
@@ -80,7 +80,7 @@ mod parsing_tests {
     fn test_parse_session_with_numeric_names() {
         let output = "123:1:0:456:789\n0:2:1:111:222";
         let sessions = parse_tmux_sessions(output);
-        
+
         assert_eq!(sessions.len(), 2);
         assert_eq!(sessions[0].name, "123");
         assert_eq!(sessions[1].name, "0");
@@ -90,7 +90,7 @@ mod parsing_tests {
     fn test_parse_invalid_window_count() {
         let output = "main:invalid:1:123:456";
         let sessions = parse_tmux_sessions(output);
-        
+
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].windows, 0); // Should default to 0 for invalid numbers
     }
@@ -99,18 +99,18 @@ mod parsing_tests {
     fn test_parse_attached_status_variations() {
         let output = "attached:1:1:123:456\ndetached:1:0:123:456\ninvalid:1:2:123:456";
         let sessions = parse_tmux_sessions(output);
-        
+
         assert_eq!(sessions.len(), 3);
-        assert_eq!(sessions[0].attached, true);   // "1" = attached
-        assert_eq!(sessions[1].attached, false);  // "0" = detached
-        assert_eq!(sessions[2].attached, false);  // anything else = detached
+        assert_eq!(sessions[0].attached, true); // "1" = attached
+        assert_eq!(sessions[1].attached, false); // "0" = detached
+        assert_eq!(sessions[2].attached, false); // anything else = detached
     }
 
     #[test]
     fn test_parse_empty_lines() {
         let output = "main:1:0:123:456\n\ndev:2:1:789:012\n";
         let sessions = parse_tmux_sessions(output);
-        
+
         assert_eq!(sessions.len(), 2);
         assert_eq!(sessions[0].name, "main");
         assert_eq!(sessions[1].name, "dev");
@@ -120,7 +120,7 @@ mod parsing_tests {
     fn test_parse_incomplete_lines() {
         let output = "complete:1:0:123:456\nincomplete:data\nanother:complete:line:1:0:789:012";
         let sessions = parse_tmux_sessions(output);
-        
+
         // Should only parse the complete lines
         assert_eq!(sessions.len(), 2);
         assert_eq!(sessions[0].name, "complete");
@@ -133,7 +133,7 @@ mod parsing_tests {
         // This test documents the current behavior
         let output = "name:with:colons:1:0:123:456";
         let sessions = parse_tmux_sessions(output);
-        
+
         // The parser will take the first part as the name
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].name, "name");
@@ -143,7 +143,7 @@ mod parsing_tests {
     fn test_parse_sessions_with_extra_fields() {
         let output = "main:1:0:123:456:extra:field";
         let sessions = parse_tmux_sessions(output);
-        
+
         // Should still parse correctly with extra fields
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].name, "main");
@@ -157,7 +157,7 @@ mod parsing_tests {
     fn test_parse_very_large_window_count() {
         let output = "main:999999:1:123:456";
         let sessions = parse_tmux_sessions(output);
-        
+
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].windows, 999999);
     }
@@ -166,7 +166,7 @@ mod parsing_tests {
     fn test_parse_negative_window_count() {
         let output = "main:-1:1:123:456";
         let sessions = parse_tmux_sessions(output);
-        
+
         // Negative numbers should default to 0
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].windows, 0);
@@ -176,7 +176,7 @@ mod parsing_tests {
     fn test_parse_unicode_session_names() {
         let output = "🚀session:1:0:123:456\n测试:2:1:789:012";
         let sessions = parse_tmux_sessions(output);
-        
+
         assert_eq!(sessions.len(), 2);
         assert_eq!(sessions[0].name, "🚀session");
         assert_eq!(sessions[1].name, "测试");
@@ -186,7 +186,7 @@ mod parsing_tests {
     fn test_parse_whitespace_handling() {
         let output = " main:1:0:123:456 \n\t dev:2:1:789:012\t";
         let sessions = parse_tmux_sessions(output);
-        
+
         assert_eq!(sessions.len(), 2);
         assert_eq!(sessions[0].name, " main"); // Leading space preserved
         assert_eq!(sessions[1].name, "\t dev"); // Leading tab preserved
@@ -196,7 +196,7 @@ mod parsing_tests {
     fn test_parse_windows_with_decimal() {
         let output = "main:1.5:1:123:456";
         let sessions = parse_tmux_sessions(output);
-        
+
         // Decimal numbers should not parse correctly and default to 0
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].windows, 0);
@@ -207,7 +207,7 @@ mod parsing_tests {
         let long_name = "a".repeat(1000);
         let output = format!("{}:1:0:123:456", long_name);
         let sessions = parse_tmux_sessions(&output);
-        
+
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].name, long_name);
     }
@@ -216,7 +216,7 @@ mod parsing_tests {
     fn test_parse_mixed_line_endings() {
         let output = "unix:1:0:123:456\nwindows:2:1:789:012\r\nmixed:3:0:345:678\r\n";
         let sessions = parse_tmux_sessions(output);
-        
+
         // Should handle different line endings gracefully
         assert_eq!(sessions.len(), 3);
         assert_eq!(sessions[0].name, "unix");
