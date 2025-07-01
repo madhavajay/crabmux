@@ -5,6 +5,15 @@ on:
     branches:
       - main
   workflow_dispatch:
+    inputs:
+      force_version:
+        description: 'Force a specific version (e.g., 0.1.1)'
+        required: false
+        type: string
+
+permissions:
+  contents: write
+  packages: write
 
 env:
   CARGO_TERM_COLOR: always
@@ -41,25 +50,40 @@ jobs:
       - name: Check version
         id: check
         run: |
-          # Get current version from Cargo.toml
-          CURRENT_VERSION=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
-          echo "current_version=$CURRENT_VERSION" >> $GITHUB_OUTPUT
-          
-          # Check if this version has been published already
-          if git tag | grep -q "v$CURRENT_VERSION"; then
-            echo "Version $CURRENT_VERSION already exists, bumping patch version"
-            IFS='.' read -ra VERSION_PARTS <<< "$CURRENT_VERSION"
-            MAJOR="${VERSION_PARTS[0]}"
-            MINOR="${VERSION_PARTS[1]}"
-            PATCH="${VERSION_PARTS[2]}"
-            NEW_PATCH=$((PATCH + 1))
-            NEW_VERSION="$MAJOR.$MINOR.$NEW_PATCH"
+          # Check if force_version is provided
+          if [[ -n "${{ github.event.inputs.force_version }}" ]]; then
+            CURRENT_VERSION=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
+            NEW_VERSION="${{ github.event.inputs.force_version }}"
+            echo "current_version=$CURRENT_VERSION" >> $GITHUB_OUTPUT
             echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT
-            echo "needs_bump=true" >> $GITHUB_OUTPUT
+            if [[ "$CURRENT_VERSION" != "$NEW_VERSION" ]]; then
+              echo "needs_bump=true" >> $GITHUB_OUTPUT
+              echo "Forcing version from $CURRENT_VERSION to $NEW_VERSION"
+            else
+              echo "needs_bump=false" >> $GITHUB_OUTPUT
+              echo "Version is already $NEW_VERSION"
+            fi
           else
-            echo "Version $CURRENT_VERSION is new"
-            echo "new_version=$CURRENT_VERSION" >> $GITHUB_OUTPUT
-            echo "needs_bump=false" >> $GITHUB_OUTPUT
+            # Get current version from Cargo.toml
+            CURRENT_VERSION=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
+            echo "current_version=$CURRENT_VERSION" >> $GITHUB_OUTPUT
+            
+            # Check if this version has been published already
+            if git tag | grep -q "v$CURRENT_VERSION"; then
+              echo "Version $CURRENT_VERSION already exists, bumping patch version"
+              IFS='.' read -ra VERSION_PARTS <<< "$CURRENT_VERSION"
+              MAJOR="${VERSION_PARTS[0]}"
+              MINOR="${VERSION_PARTS[1]}"
+              PATCH="${VERSION_PARTS[2]}"
+              NEW_PATCH=$((PATCH + 1))
+              NEW_VERSION="$MAJOR.$MINOR.$NEW_PATCH"
+              echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT
+              echo "needs_bump=true" >> $GITHUB_OUTPUT
+            else
+              echo "Version $CURRENT_VERSION is new"
+              echo "new_version=$CURRENT_VERSION" >> $GITHUB_OUTPUT
+              echo "needs_bump=false" >> $GITHUB_OUTPUT
+            fi
           fi
 
   bump-version:
@@ -67,20 +91,25 @@ jobs:
     runs-on: ubuntu-latest
     needs: check-version
     if: needs.check-version.outputs.needs_bump == 'true'
+    outputs:
+      version: ${{ needs.check-version.outputs.new_version }}
     steps:
       - uses: actions/checkout@v4
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
       
       - name: Update version in Cargo.toml
         run: |
           sed -i 's/^version = .*/version = "${{ needs.check-version.outputs.new_version }}"/' Cargo.toml
+          # Also update Cargo.lock
+          cargo update --workspace
       
       - name: Commit version bump
         run: |
           git config user.name github-actions[bot]
           git config user.email github-actions[bot]@users.noreply.github.com
-          git add Cargo.toml
+          git add Cargo.toml Cargo.lock
           git commit -m "chore: bump version to ${{ needs.check-version.outputs.new_version }}"
           git push
 
@@ -88,7 +117,10 @@ jobs:
     name: Build ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
     needs: [check-version, bump-version]
-    if: always() && needs.check-version.result == 'success'
+    if: |
+      always() && 
+      needs.check-version.result == 'success' &&
+      (needs.bump-version.result == 'success' || needs.bump-version.result == 'skipped')
     strategy:
       matrix:
         include:
@@ -181,8 +213,11 @@ jobs:
   publish-crate:
     name: Publish to crates.io
     runs-on: ubuntu-latest
-    needs: [build, check-version]
-    if: always() && needs.build.result == 'success'
+    needs: [build, check-version, bump-version]
+    if: |
+      always() && 
+      needs.build.result == 'success' &&
+      (needs.bump-version.result == 'success' || needs.bump-version.result == 'skipped')
     steps:
       - uses: actions/checkout@v4
         with:
@@ -201,8 +236,11 @@ jobs:
   create-release:
     name: Create GitHub Release
     runs-on: ubuntu-latest
-    needs: [build, check-version, publish-crate]
-    if: always() && needs.build.result == 'success'
+    needs: [build, check-version, bump-version, publish-crate]
+    if: |
+      always() && 
+      needs.build.result == 'success' &&
+      (needs.bump-version.result == 'success' || needs.bump-version.result == 'skipped')
     steps:
       - uses: actions/checkout@v4
         with:
