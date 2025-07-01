@@ -27,6 +27,7 @@ fn test_cmux_version() {
 }
 
 #[test]
+#[cfg(unix)]
 fn test_list_command() {
     let mut cmd = Command::cargo_bin("cmux").unwrap();
     // This will fail if tmux is not installed, but that's expected in CI
@@ -53,6 +54,7 @@ fn test_alias_command_without_args() {
 }
 
 #[test]
+#[cfg(unix)]
 fn test_info_command_without_session() {
     let mut cmd = Command::cargo_bin("cmux").unwrap();
     // This should fail gracefully when no sessions exist
@@ -131,6 +133,7 @@ fn test_rename_command_validation() {
 }
 
 #[test]
+#[cfg(unix)]
 fn test_kill_without_session_name() {
     let mut cmd = Command::cargo_bin("cmux").unwrap();
     cmd.arg("kill")

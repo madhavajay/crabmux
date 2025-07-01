@@ -24,6 +24,7 @@ fn test_cli_no_arguments() {
 }
 
 #[test]
+#[cfg(unix)]
 fn test_list_command_short_alias() {
     let mut cmd = Command::cargo_bin("cmux").unwrap();
     let output = cmd.arg("ls").output().unwrap();
@@ -38,6 +39,7 @@ fn test_list_command_short_alias() {
 }
 
 #[test]
+#[cfg(unix)]
 fn test_attach_command_variations() {
     let mut cmd = Command::cargo_bin("cmux").unwrap();
     // Test attach with session name
@@ -107,6 +109,7 @@ fn test_new_command_variations() {
 }
 
 #[test]
+#[cfg(unix)]
 fn test_kill_command_variations() {
     let mut cmd = Command::cargo_bin("cmux").unwrap();
     // Test kill with session name
@@ -209,6 +212,7 @@ fn test_top_command() {
 }
 
 #[test]
+#[cfg(unix)]
 fn test_info_command_variations() {
     let mut cmd = Command::cargo_bin("cmux").unwrap();
     // Test info with session name
@@ -234,6 +238,7 @@ fn test_info_command_variations() {
 }
 
 #[test]
+#[cfg(unix)]
 fn test_kill_all_command() {
     let mut cmd = Command::cargo_bin("cmux").unwrap();
     // Test kill-all with 'n' input

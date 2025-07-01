@@ -53,6 +53,7 @@ fn test_restore_with_wrong_json_structure() {
 }
 
 #[test]
+#[cfg(unix)]
 fn test_attach_with_nonexistent_session() {
     let mut cmd = Command::cargo_bin("cmux").unwrap();
     let output = cmd
@@ -73,6 +74,7 @@ fn test_attach_with_nonexistent_session() {
 }
 
 #[test]
+#[cfg(unix)]
 fn test_kill_with_nonexistent_session() {
     let mut cmd = Command::cargo_bin("cmux").unwrap();
     let output = cmd
@@ -91,6 +93,7 @@ fn test_kill_with_nonexistent_session() {
 }
 
 #[test]
+#[cfg(unix)]
 fn test_rename_with_nonexistent_session() {
     let mut cmd = Command::cargo_bin("cmux").unwrap();
     let output = cmd
@@ -110,6 +113,7 @@ fn test_rename_with_nonexistent_session() {
 }
 
 #[test]
+#[cfg(unix)]
 fn test_info_with_nonexistent_session() {
     let mut cmd = Command::cargo_bin("cmux").unwrap();
     cmd.arg("info")
