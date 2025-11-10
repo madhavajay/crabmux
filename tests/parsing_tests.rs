@@ -44,7 +44,7 @@ mod parsing_tests {
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].name, "main");
         assert_eq!(sessions[0].windows, 3);
-        assert_eq!(sessions[0].attached, true);
+        assert!(sessions[0].attached);
         assert_eq!(sessions[0].created, "1640995200");
         assert_eq!(sessions[0].activity, "1640995200");
     }
@@ -57,13 +57,13 @@ mod parsing_tests {
         assert_eq!(sessions.len(), 3);
 
         assert_eq!(sessions[0].name, "main");
-        assert_eq!(sessions[0].attached, true);
+        assert!(sessions[0].attached);
 
         assert_eq!(sessions[1].name, "dev");
-        assert_eq!(sessions[1].attached, false);
+        assert!(!sessions[1].attached);
 
         assert_eq!(sessions[2].name, "test");
-        assert_eq!(sessions[2].attached, false);
+        assert!(!sessions[2].attached);
     }
 
     #[test]
@@ -101,9 +101,9 @@ mod parsing_tests {
         let sessions = parse_tmux_sessions(output);
 
         assert_eq!(sessions.len(), 3);
-        assert_eq!(sessions[0].attached, true); // "1" = attached
-        assert_eq!(sessions[1].attached, false); // "0" = detached
-        assert_eq!(sessions[2].attached, false); // anything else = detached
+        assert!(sessions[0].attached); // "1" = attached
+        assert!(!sessions[1].attached); // "0" = detached
+        assert!(!sessions[2].attached); // anything else = detached
     }
 
     #[test]
@@ -148,7 +148,7 @@ mod parsing_tests {
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].name, "main");
         assert_eq!(sessions[0].windows, 1);
-        assert_eq!(sessions[0].attached, false);
+        assert!(!sessions[0].attached);
         assert_eq!(sessions[0].created, "123");
         assert_eq!(sessions[0].activity, "456");
     }

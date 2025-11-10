@@ -77,7 +77,7 @@ fn test_new_command_variations() {
     // If it succeeds, clean up the session
     if output.status.success() {
         let _ = std::process::Command::new("tmux")
-            .args(&["kill-session", "-t", &unique_session_name])
+            .args(["kill-session", "-t", &unique_session_name])
             .output();
     }
 
@@ -85,14 +85,14 @@ fn test_new_command_variations() {
     // Test new short alias
     let output = cmd
         .arg("n")
-        .arg(&format!("{}-alias", unique_session_name))
+        .arg(format!("{}-alias", unique_session_name))
         .output()
         .unwrap();
 
     // If it succeeds, clean up the session
     if output.status.success() {
         let _ = std::process::Command::new("tmux")
-            .args(&[
+            .args([
                 "kill-session",
                 "-t",
                 &format!("{}-alias", unique_session_name),

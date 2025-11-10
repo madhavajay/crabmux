@@ -24,7 +24,7 @@ use std::{
     io::{self, IsTerminal, Write},
     path::PathBuf,
     process::{Command, Output},
-    time::Duration,
+    time::{Duration, Instant},
 };
 use sysinfo::System;
 
@@ -255,6 +255,11 @@ impl App {
 
     fn refresh(&mut self) -> Result<()> {
         self.sessions = get_tmux_sessions_with_system(&mut self.system)?;
+        if self.sessions.is_empty() {
+            self.selected = 0;
+        } else if self.selected >= self.sessions.len() {
+            self.selected = self.sessions.len() - 1;
+        }
         Ok(())
     }
 
@@ -973,6 +978,8 @@ fn draw_top_ui(f: &mut Frame, app: &App) {
     f.render_widget(help, chunks[2]);
 }
 
+const AUTO_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
+
 fn run_tui() -> Result<()> {
     // Check if we're in a proper terminal
     if !std::io::stdout().is_terminal() {
@@ -989,39 +996,52 @@ fn run_tui() -> Result<()> {
     let mut app = App::new()?;
     let mut list_state = ListState::default();
     list_state.select(Some(0));
+    let mut last_refresh = Instant::now();
 
     loop {
         terminal.draw(|f| draw_ui(f, &mut app, &mut list_state))?;
 
-        if let Event::Key(key) = event::read()? {
-            match handle_input(&mut app, key)? {
-                InputResult::Continue => {}
-                InputResult::Quit => break,
-                InputResult::AttachSession(name) => {
-                    // Clean up terminal before attaching
-                    disable_raw_mode()?;
-                    execute!(
-                        terminal.backend_mut(),
-                        LeaveAlternateScreen,
-                        DisableMouseCapture
-                    )?;
-                    terminal.show_cursor()?;
+        let timeout = AUTO_REFRESH_INTERVAL
+            .checked_sub(last_refresh.elapsed())
+            .unwrap_or(Duration::from_secs(0));
 
-                    // Attach to session
-                    attach_session(Some(name))?;
+        if event::poll(timeout)? {
+            if let Event::Key(key) = event::read()? {
+                match handle_input(&mut app, key)? {
+                    InputResult::Continue => {}
+                    InputResult::Quit => break,
+                    InputResult::AttachSession(name) => {
+                        // Clean up terminal before attaching
+                        disable_raw_mode()?;
+                        execute!(
+                            terminal.backend_mut(),
+                            LeaveAlternateScreen,
+                            DisableMouseCapture
+                        )?;
+                        terminal.show_cursor()?;
 
-                    // Re-enter TUI mode after detaching
-                    enable_raw_mode()?;
-                    let mut new_stdout = io::stdout();
-                    execute!(new_stdout, EnterAlternateScreen, EnableMouseCapture)?;
+                        // Attach to session
+                        attach_session(Some(name))?;
 
-                    // Clear the screen and refresh the terminal
-                    let backend = CrosstermBackend::new(new_stdout);
-                    terminal = Terminal::new(backend)?;
-                    terminal.clear()?;
-                    app.refresh()?;
+                        // Re-enter TUI mode after detaching
+                        enable_raw_mode()?;
+                        let mut new_stdout = io::stdout();
+                        execute!(new_stdout, EnterAlternateScreen, EnableMouseCapture)?;
+
+                        // Clear the screen and refresh the terminal
+                        let backend = CrosstermBackend::new(new_stdout);
+                        terminal = Terminal::new(backend)?;
+                        terminal.clear()?;
+                        app.refresh()?;
+                        last_refresh = Instant::now();
+                    }
                 }
             }
+        }
+
+        if last_refresh.elapsed() >= AUTO_REFRESH_INTERVAL {
+            app.refresh()?;
+            last_refresh = Instant::now();
         }
     }
 
@@ -1389,6 +1409,7 @@ mod tests {
             self.responses.insert(key, Ok(output));
         }
 
+        #[allow(dead_code)]
         fn add_error_response(&mut self, args: Vec<&str>) {
             let key = args.join(" ");
             self.responses
@@ -1416,15 +1437,15 @@ mod tests {
 
         assert_eq!(sessions[0].name, "main");
         assert_eq!(sessions[0].windows, 3);
-        assert_eq!(sessions[0].attached, true);
+        assert!(sessions[0].attached);
 
         assert_eq!(sessions[1].name, "dev");
         assert_eq!(sessions[1].windows, 1);
-        assert_eq!(sessions[1].attached, false);
+        assert!(!sessions[1].attached);
 
         assert_eq!(sessions[2].name, "test");
         assert_eq!(sessions[2].windows, 2);
-        assert_eq!(sessions[2].attached, false);
+        assert!(!sessions[2].attached);
     }
 
     #[test]
@@ -1501,7 +1522,7 @@ mod tests {
 
         assert_eq!(session.name, "test");
         assert_eq!(session.windows, 2);
-        assert_eq!(session.attached, true);
+        assert!(session.attached);
     }
 
     #[test]
@@ -1593,11 +1614,11 @@ mod tests {
             system: System::new_all(),
         };
 
-        assert_eq!(app.show_help, false);
+        assert!(!app.show_help);
         app.toggle_help();
-        assert_eq!(app.show_help, true);
+        assert!(app.show_help);
         app.toggle_help();
-        assert_eq!(app.show_help, false);
+        assert!(!app.show_help);
     }
 
     #[test]
