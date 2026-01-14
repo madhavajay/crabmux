@@ -1,6 +1,6 @@
 [package]
 name = "crabmux"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 authors = ["Madhava Jay"]
 description = "A modern tmux session manager with an interactive TUI"
