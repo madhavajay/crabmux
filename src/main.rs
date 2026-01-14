@@ -104,6 +104,12 @@ enum Commands {
         session: Option<String>,
     },
 
+    /// Configure remote hosts for SSH tmux listing
+    Host {
+        #[command(subcommand)]
+        command: HostCommands,
+    },
+
     /// Show live session overview
     Top,
 
@@ -122,15 +128,54 @@ enum Commands {
     Version,
 }
 
+#[derive(Subcommand)]
+enum HostCommands {
+    /// Add a remote host
+    Add {
+        /// Friendly name for the host
+        name: String,
+        /// SSH target (user@host or host)
+        host: String,
+        /// Optional SSH key path
+        #[arg(long)]
+        key: Option<String>,
+    },
+    /// Remove a remote host by name
+    Remove {
+        /// Host name to remove
+        name: String,
+    },
+    /// List configured remote hosts
+    List,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct TmuxSession {
     name: String,
     windows: usize,
     attached: bool,
+    #[serde(default)]
+    attached_clients: usize,
+    #[serde(default)]
+    attached_users: Vec<String>,
     created: String,
     activity: String,
     process_info: Option<ProcessInfo>,
     resource_info: Option<ResourceInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct HostConfig {
+    name: String,
+    host: String,
+    #[serde(default)]
+    key: Option<String>,
+}
+
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+struct HostsConfig {
+    #[serde(default)]
+    hosts: Vec<HostConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -152,32 +197,100 @@ struct SessionSnapshot {
     timestamp: String,
 }
 
+#[derive(Debug, Clone)]
+struct RemoteHostSessions {
+    host: HostConfig,
+    sessions: Vec<TmuxSession>,
+    error: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+enum SessionOrigin {
+    Local,
+    Remote(HostConfig),
+}
+
+#[derive(Debug, Clone)]
+struct SessionEntry {
+    origin: SessionOrigin,
+    session: TmuxSession,
+}
+
+#[derive(Debug, Clone)]
+enum ListEntry {
+    Header {
+        title: String,
+        host: Option<HostConfig>,
+    },
+    Session(SessionEntry),
+}
+
+const AUTO_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
+const STATUS_MESSAGE_TTL: Duration = Duration::from_secs(4);
+const SSH_LIST_TIMEOUT_SECS: u64 = 3;
+const SSH_ATTACH_TIMEOUT_SECS: u64 = 5;
+const SSH_ACTION_TIMEOUT_SECS: u64 = 5;
+const TMUX_LIST_FORMAT: &str =
+    "#{session_name}:#{session_windows}:#{session_attached}:#{session_created}:#{session_activity}";
+
 struct App {
     sessions: Vec<TmuxSession>,
+    remote_hosts: Vec<RemoteHostSessions>,
     selected: usize,
     show_help: bool,
     #[allow(dead_code)]
     aliases: HashMap<String, String>,
+    hosts: Vec<HostConfig>,
     show_new_session_popup: bool,
     new_session_input: String,
+    new_session_cursor: usize,
+    new_session_target: NewSessionTarget,
+    show_new_host_popup: bool,
+    new_host_name_input: String,
+    new_host_name_cursor: usize,
+    new_host_host_input: String,
+    new_host_host_cursor: usize,
+    new_host_active_field: HostField,
+    new_host_error: Option<String>,
+    show_kill_confirm: bool,
+    kill_confirm_target: Option<KillTarget>,
+    status_message: Option<String>,
+    status_message_expires: Option<Instant>,
     system: System,
 }
 
 impl App {
     fn new() -> Result<Self> {
-        let sessions = get_tmux_sessions()?;
         let aliases = load_aliases()?;
+        let hosts = load_hosts()?;
         let mut system = System::new_all();
         system.refresh_all();
-        Ok(App {
-            sessions,
+        let mut app = App {
+            sessions: Vec::new(),
+            remote_hosts: Vec::new(),
             selected: 0,
             show_help: false,
             aliases,
+            hosts,
             show_new_session_popup: false,
             new_session_input: String::new(),
+            new_session_cursor: 0,
+            new_session_target: NewSessionTarget::Local,
+            show_new_host_popup: false,
+            new_host_name_input: String::new(),
+            new_host_name_cursor: 0,
+            new_host_host_input: String::new(),
+            new_host_host_cursor: 0,
+            new_host_active_field: HostField::Host,
+            new_host_error: None,
+            show_kill_confirm: false,
+            kill_confirm_target: None,
+            status_message: None,
+            status_message_expires: None,
             system,
-        })
+        };
+        app.refresh()?;
+        Ok(app)
     }
 
     /// Get the appropriate highlight style based on terminal capabilities
@@ -255,24 +368,29 @@ impl App {
 
     fn refresh(&mut self) -> Result<()> {
         self.sessions = get_tmux_sessions_with_system(&mut self.system)?;
-        if self.sessions.is_empty() {
+        self.hosts = load_hosts()?;
+        self.remote_hosts = get_remote_sessions(&self.hosts);
+        let entries_len = self.build_entries().len();
+        if entries_len == 0 {
             self.selected = 0;
-        } else if self.selected >= self.sessions.len() {
-            self.selected = self.sessions.len() - 1;
+        } else if self.selected >= entries_len {
+            self.selected = entries_len - 1;
         }
         Ok(())
     }
 
     fn next(&mut self) {
-        if !self.sessions.is_empty() {
-            self.selected = (self.selected + 1) % self.sessions.len();
+        let entries_len = self.build_entries().len();
+        if entries_len > 0 {
+            self.selected = (self.selected + 1) % entries_len;
         }
     }
 
     fn previous(&mut self) {
-        if !self.sessions.is_empty() {
+        let entries_len = self.build_entries().len();
+        if entries_len > 0 {
             self.selected = if self.selected == 0 {
-                self.sessions.len() - 1
+                entries_len - 1
             } else {
                 self.selected - 1
             };
@@ -286,19 +404,143 @@ impl App {
     fn show_new_session_popup(&mut self) {
         self.show_new_session_popup = true;
         self.new_session_input.clear();
+        self.new_session_cursor = 0;
+        self.show_new_host_popup = false;
     }
 
     fn hide_new_session_popup(&mut self) {
         self.show_new_session_popup = false;
         self.new_session_input.clear();
+        self.new_session_cursor = 0;
     }
 
     fn handle_new_session_input(&mut self, c: char) {
-        self.new_session_input.push(c);
+        insert_char_at(&mut self.new_session_input, c, &mut self.new_session_cursor);
     }
 
     fn backspace_new_session_input(&mut self) {
-        self.new_session_input.pop();
+        remove_char_before(&mut self.new_session_input, &mut self.new_session_cursor);
+    }
+
+    fn show_new_host_popup(&mut self) {
+        self.show_new_host_popup = true;
+        self.new_host_name_input.clear();
+        self.new_host_name_cursor = 0;
+        self.new_host_host_input.clear();
+        self.new_host_host_cursor = 0;
+        self.new_host_active_field = HostField::Host;
+        self.new_host_error = None;
+        self.show_new_session_popup = false;
+    }
+
+    fn hide_new_host_popup(&mut self) {
+        self.show_new_host_popup = false;
+        self.new_host_name_input.clear();
+        self.new_host_name_cursor = 0;
+        self.new_host_host_input.clear();
+        self.new_host_host_cursor = 0;
+        self.new_host_active_field = HostField::Host;
+        self.new_host_error = None;
+    }
+
+    fn show_kill_confirm(&mut self, target: KillTarget) {
+        self.show_kill_confirm = true;
+        self.kill_confirm_target = Some(target);
+        self.show_new_session_popup = false;
+        self.show_new_host_popup = false;
+    }
+
+    fn hide_kill_confirm(&mut self) {
+        self.show_kill_confirm = false;
+        self.kill_confirm_target = None;
+    }
+
+    fn handle_new_host_input(&mut self, c: char) {
+        match self.new_host_active_field {
+            HostField::Name => insert_char_at(
+                &mut self.new_host_name_input,
+                c,
+                &mut self.new_host_name_cursor,
+            ),
+            HostField::Host => insert_char_at(
+                &mut self.new_host_host_input,
+                c,
+                &mut self.new_host_host_cursor,
+            ),
+        }
+    }
+
+    fn backspace_new_host_input(&mut self) {
+        match self.new_host_active_field {
+            HostField::Name => remove_char_before(
+                &mut self.new_host_name_input,
+                &mut self.new_host_name_cursor,
+            ),
+            HostField::Host => remove_char_before(
+                &mut self.new_host_host_input,
+                &mut self.new_host_host_cursor,
+            ),
+        }
+    }
+
+    fn build_entries(&self) -> Vec<ListEntry> {
+        let mut entries = Vec::new();
+        let has_remote = !self.remote_hosts.is_empty();
+
+        if has_remote {
+            entries.push(ListEntry::Header {
+                title: "Local".to_string(),
+                host: None,
+            });
+        }
+
+        for session in &self.sessions {
+            entries.push(ListEntry::Session(SessionEntry {
+                origin: SessionOrigin::Local,
+                session: session.clone(),
+            }));
+        }
+
+        for host_sessions in &self.remote_hosts {
+            let mut header = if host_sessions.host.name == host_sessions.host.host {
+                format!("Remote: {}", host_sessions.host.host)
+            } else {
+                format!(
+                    "Remote: {} ({})",
+                    host_sessions.host.name, host_sessions.host.host
+                )
+            };
+            if host_sessions.error.is_some() {
+                header.push_str(" - offline");
+            }
+            entries.push(ListEntry::Header {
+                title: header,
+                host: Some(host_sessions.host.clone()),
+            });
+
+            for session in &host_sessions.sessions {
+                entries.push(ListEntry::Session(SessionEntry {
+                    origin: SessionOrigin::Remote(host_sessions.host.clone()),
+                    session: session.clone(),
+                }));
+            }
+        }
+
+        entries
+    }
+
+    fn set_status_message(&mut self, message: impl Into<String>) {
+        self.status_message = Some(message.into());
+        self.status_message_expires = Some(Instant::now() + STATUS_MESSAGE_TTL);
+    }
+
+    fn clear_expired_status(&mut self) {
+        if let Some(expires) = self.status_message_expires {
+            if Instant::now() >= expires {
+                self.status_message = None;
+                self.status_message_expires = None;
+            }
+        }
     }
 }
 
@@ -314,6 +556,7 @@ fn main() -> Result<()> {
         Some(Commands::Rename { old_name, new_name }) => rename_session(&old_name, &new_name)?,
         Some(Commands::Restore { file }) => restore_sessions(file)?,
         Some(Commands::Alias { name, session }) => manage_alias(name, session)?,
+        Some(Commands::Host { command }) => manage_hosts(command)?,
         Some(Commands::Top) => run_top_mode()?,
         Some(Commands::Info { session }) => show_session_info(session)?,
         Some(Commands::KillAll) => kill_all_sessions()?,
@@ -347,7 +590,7 @@ fn get_tmux_sessions_with_executor_and_system(
     executor: &dyn TmuxExecutor,
     system: &mut System,
 ) -> Result<Vec<TmuxSession>> {
-    let output = executor.execute_command(&["list-sessions", "-F", "#{session_name}:#{session_windows}:#{session_attached}:#{session_created}:#{session_activity}"])?;
+    let output = executor.execute_command(&["list-sessions", "-F", TMUX_LIST_FORMAT])?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -376,16 +619,105 @@ fn get_tmux_sessions_with_executor_and_system(
     Ok(sessions)
 }
 
+fn expand_tilde(path: &str) -> String {
+    if let Some(stripped) = path.strip_prefix("~/") {
+        if let Ok(home) = std::env::var("HOME") {
+            return PathBuf::from(home)
+                .join(stripped)
+                .to_string_lossy()
+                .to_string();
+        }
+    }
+    path.to_string()
+}
+
+fn shell_quote(value: &str) -> String {
+    let mut escaped = String::from("'");
+    for ch in value.chars() {
+        if ch == '\'' {
+            escaped.push_str("'\\''");
+        } else {
+            escaped.push(ch);
+        }
+    }
+    escaped.push('\'');
+    escaped
+}
+
+fn apply_ssh_args(cmd: &mut Command, host: &HostConfig, timeout_secs: u64, batch_mode: bool) {
+    cmd.arg("-o")
+        .arg(format!("ConnectTimeout={}", timeout_secs));
+    if batch_mode {
+        cmd.arg("-o")
+            .arg("BatchMode=yes")
+            .arg("-o")
+            .arg("NumberOfPasswordPrompts=0");
+    }
+    if let Some(ref key) = host.key {
+        cmd.arg("-i").arg(expand_tilde(key));
+    }
+    cmd.arg(&host.host);
+}
+
+fn get_tmux_sessions_remote(host: &HostConfig) -> Result<Vec<TmuxSession>> {
+    let mut cmd = Command::new("ssh");
+    apply_ssh_args(&mut cmd, host, SSH_LIST_TIMEOUT_SECS, true);
+    let remote_cmd = format!("tmux list-sessions -F \"{}\"", TMUX_LIST_FORMAT);
+    cmd.arg(remote_cmd);
+
+    let output = cmd.output().context("Failed to execute ssh command")?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if stderr.contains("no server running")
+            || stderr.contains("no sessions")
+            || stderr.contains("no current client")
+            || stderr.contains("can't find session")
+            || stderr.contains("server not found")
+            || stderr.contains("error connecting to")
+            || stderr.contains("No such file or directory")
+            || stderr.contains("server exited unexpectedly")
+        {
+            return Ok(Vec::new());
+        }
+        return Err(anyhow::anyhow!("{}", stderr.trim()));
+    }
+
+    Ok(parse_tmux_sessions(&String::from_utf8_lossy(
+        &output.stdout,
+    )))
+}
+
+fn get_remote_sessions(hosts: &[HostConfig]) -> Vec<RemoteHostSessions> {
+    hosts
+        .iter()
+        .map(|host| match get_tmux_sessions_remote(host) {
+            Ok(sessions) => RemoteHostSessions {
+                host: host.clone(),
+                sessions,
+                error: None,
+            },
+            Err(err) => RemoteHostSessions {
+                host: host.clone(),
+                sessions: Vec::new(),
+                error: Some(err.to_string()),
+            },
+        })
+        .collect()
+}
+
 fn parse_tmux_sessions(output: &str) -> Vec<TmuxSession> {
     output
         .lines()
         .filter_map(|line| {
             let parts: Vec<&str> = line.split(':').collect();
             if parts.len() >= 5 {
+                let attached_clients = parts[2].parse::<usize>().unwrap_or(0);
                 Some(TmuxSession {
                     name: parts[0].to_string(),
                     windows: parts[1].parse().unwrap_or(0),
-                    attached: parts[2] == "1",
+                    attached: attached_clients > 0,
+                    attached_clients,
+                    attached_users: Vec::new(),
                     created: parts[3].to_string(),
                     activity: parts[4].to_string(),
                     process_info: None,
@@ -445,6 +777,28 @@ fn enrich_session_info(
                     cpu_percent: total_cpu,
                 });
             }
+
+            if session.attached_clients > 0 {
+                if let Ok(output) = executor.execute_command(&[
+                    "list-clients",
+                    "-t",
+                    &session.name,
+                    "-F",
+                    "#{client_user}",
+                ]) {
+                    if output.status.success() {
+                        let mut users: Vec<String> = String::from_utf8_lossy(&output.stdout)
+                            .lines()
+                            .map(str::trim)
+                            .filter(|line| !line.is_empty())
+                            .map(|line| line.to_string())
+                            .collect();
+                        users.sort();
+                        users.dedup();
+                        session.attached_users = users;
+                    }
+                }
+            }
         }
     }
 
@@ -463,6 +817,12 @@ fn enrich_session_info(
             memory_mb: 0.0,
             cpu_percent: 0.0,
         });
+    }
+
+    if session.attached_clients > 0 && session.attached_users.is_empty() {
+        if let Some(ref process) = session.process_info {
+            session.attached_users = vec![process.user.clone()];
+        }
     }
 }
 
@@ -506,6 +866,10 @@ fn attach_session(session_name: Option<String>) -> Result<()> {
         }
     };
 
+    let _ = Command::new("tmux")
+        .args(["set-option", "-g", "detach-on-destroy", "on"])
+        .output();
+
     let status = Command::new("tmux")
         .args(["attach-session", "-t", &target_session])
         .status()
@@ -515,6 +879,74 @@ fn attach_session(session_name: Option<String>) -> Result<()> {
         return Err(anyhow::anyhow!(
             "Failed to attach to session '{}'. Session may not exist.",
             target_session
+        ));
+    }
+
+    Ok(())
+}
+
+fn attach_remote_session(host: &HostConfig, session_name: &str) -> Result<()> {
+    let mut cmd = Command::new("ssh");
+    cmd.arg("-t");
+    apply_ssh_args(&mut cmd, host, SSH_ATTACH_TIMEOUT_SECS, false);
+    let remote_cmd = format!(
+        "tmux set-option -g detach-on-destroy on >/dev/null 2>&1; tmux attach-session -t {}",
+        session_name
+    );
+    let status = cmd
+        .arg(remote_cmd)
+        .status()
+        .context("Failed to execute ssh attach command")?;
+
+    if !status.success() {
+        return Err(anyhow::anyhow!(
+            "Failed to attach to remote session '{}' on '{}'",
+            session_name,
+            host.name
+        ));
+    }
+
+    Ok(())
+}
+
+fn kill_remote_session(host: &HostConfig, session_name: &str) -> Result<()> {
+    let mut cmd = Command::new("ssh");
+    apply_ssh_args(&mut cmd, host, SSH_ACTION_TIMEOUT_SECS, true);
+    let remote_cmd = format!("tmux kill-session -t {}", shell_quote(session_name));
+    let status = cmd
+        .arg(remote_cmd)
+        .status()
+        .context("Failed to execute ssh kill-session command")?;
+
+    if !status.success() {
+        return Err(anyhow::anyhow!(
+            "Failed to kill remote session '{}' on '{}'",
+            session_name,
+            host.name
+        ));
+    }
+
+    Ok(())
+}
+
+fn new_session_remote(host: &HostConfig, name: Option<String>) -> Result<()> {
+    let mut cmd = Command::new("ssh");
+    apply_ssh_args(&mut cmd, host, SSH_ATTACH_TIMEOUT_SECS, false);
+
+    let remote_cmd = match name {
+        Some(name) => format!("tmux new-session -d -s {}", shell_quote(&name)),
+        None => "tmux new-session -d".to_string(),
+    };
+
+    let status = cmd
+        .arg(remote_cmd)
+        .status()
+        .context("Failed to execute ssh new-session command")?;
+
+    if !status.success() {
+        return Err(anyhow::anyhow!(
+            "Failed to create remote session on '{}'",
+            host.name
         ));
     }
 
@@ -656,6 +1088,87 @@ fn save_aliases(aliases: &HashMap<String, String>) -> Result<()> {
     Ok(())
 }
 
+fn hosts_config_path() -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    PathBuf::from(home).join(".cmux_hosts.toml")
+}
+
+fn load_hosts() -> Result<Vec<HostConfig>> {
+    let path = hosts_config_path();
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let content = fs::read_to_string(&path)?;
+    if content.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    let config: HostsConfig = toml::from_str(&content).context("Failed to parse hosts config")?;
+    Ok(config.hosts)
+}
+
+fn save_hosts(hosts: &[HostConfig]) -> Result<()> {
+    let config = HostsConfig {
+        hosts: hosts.to_vec(),
+    };
+    let path = hosts_config_path();
+    let content = toml::to_string_pretty(&config).context("Failed to serialize hosts config")?;
+    fs::write(&path, content)?;
+    Ok(())
+}
+
+fn add_host_config(host: HostConfig) -> Result<()> {
+    let mut hosts = load_hosts()?;
+    if hosts.iter().any(|h| h.name == host.name) {
+        return Err(anyhow::anyhow!("Host '{}' already exists", host.name));
+    }
+    hosts.push(host);
+    save_hosts(&hosts)?;
+    Ok(())
+}
+
+fn remove_host_config(name: &str) -> Result<()> {
+    let mut hosts = load_hosts()?;
+    let original_len = hosts.len();
+    hosts.retain(|h| h.name != name);
+    if hosts.len() == original_len {
+        return Err(anyhow::anyhow!("Host '{}' not found", name));
+    }
+    save_hosts(&hosts)?;
+    Ok(())
+}
+
+fn list_hosts() -> Result<()> {
+    let hosts = load_hosts()?;
+    if hosts.is_empty() {
+        println!("No remote hosts configured.");
+        return Ok(());
+    }
+
+    println!("Remote hosts:");
+    println!("{:<16} {:<24} Key", "Name", "Host");
+    println!("{}", "-".repeat(60));
+    for host in hosts {
+        let key = host.key.unwrap_or_else(|| "default".to_string());
+        println!("{:<16} {:<24} {}", host.name, host.host, key);
+    }
+    Ok(())
+}
+
+fn manage_hosts(command: HostCommands) -> Result<()> {
+    match command {
+        HostCommands::Add { name, host, key } => {
+            add_host_config(HostConfig { name, host, key })?;
+            println!("Added host.");
+        }
+        HostCommands::Remove { name } => {
+            remove_host_config(&name)?;
+            println!("Removed host '{}'.", name);
+        }
+        HostCommands::List => list_hosts()?,
+    }
+    Ok(())
+}
+
 fn manage_alias(name: Option<String>, session: Option<String>) -> Result<()> {
     let mut aliases = load_aliases()?;
 
@@ -791,8 +1304,8 @@ fn run_top_mode() -> Result<()> {
     let mut last_refresh = std::time::Instant::now();
 
     loop {
-        // Auto-refresh every 2 seconds
-        if last_refresh.elapsed() > Duration::from_secs(2) {
+        // Auto-refresh periodically so new sessions appear without input
+        if last_refresh.elapsed() >= AUTO_REFRESH_INTERVAL {
             app.refresh()?;
             last_refresh = std::time::Instant::now();
         }
@@ -861,6 +1374,7 @@ fn draw_top_ui(f: &mut Frame, app: &App) {
         .iter()
         .map(|s| {
             let status = if s.attached { "●" } else { "○" };
+            let user = format_attached_users(s);
             let (memory_info, cpu_info) = if let Some(ref resource) = s.resource_info {
                 (
                     format!("{:.1}MB", resource.memory_mb),
@@ -868,12 +1382,6 @@ fn draw_top_ui(f: &mut Frame, app: &App) {
                 )
             } else {
                 ("N/A".to_string(), "N/A".to_string())
-            };
-
-            let user = if let Some(ref process) = s.process_info {
-                &process.user
-            } else {
-                "unknown"
             };
 
             let content = Line::from(vec![
@@ -916,7 +1424,7 @@ fn draw_top_ui(f: &mut Frame, app: &App) {
         })
         .collect();
 
-    let title = " │ Name             │Win │  Memory │   CPU │ User    ";
+    let title = " │ Name             │Win │  Memory │   CPU │ Clients ";
     // Helper function to get terminal-appropriate styles
     fn get_top_ui_highlight_style() -> Style {
         let term = std::env::var("TERM").unwrap_or_else(|_| "unknown".to_string());
@@ -978,8 +1486,6 @@ fn draw_top_ui(f: &mut Frame, app: &App) {
     f.render_widget(help, chunks[2]);
 }
 
-const AUTO_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
-
 fn run_tui() -> Result<()> {
     // Check if we're in a proper terminal
     if !std::io::stdout().is_terminal() {
@@ -1010,7 +1516,7 @@ fn run_tui() -> Result<()> {
                 match handle_input(&mut app, key)? {
                     InputResult::Continue => {}
                     InputResult::Quit => break,
-                    InputResult::AttachSession(name) => {
+                    InputResult::AttachSession(target) => {
                         // Clean up terminal before attaching
                         disable_raw_mode()?;
                         execute!(
@@ -1021,18 +1527,37 @@ fn run_tui() -> Result<()> {
                         terminal.show_cursor()?;
 
                         // Attach to session
-                        attach_session(Some(name))?;
+                        match target {
+                            AttachTarget::Local(name) => {
+                                attach_session(Some(name))?;
+                            }
+                            AttachTarget::Remote(host, name) => {
+                                attach_remote_session(&host, &name)?;
+                            }
+                        }
 
                         // Re-enter TUI mode after detaching
-                        enable_raw_mode()?;
                         let mut new_stdout = io::stdout();
+                        hard_reset_terminal(&mut new_stdout)?;
+                        enable_raw_mode()?;
                         execute!(new_stdout, EnterAlternateScreen, EnableMouseCapture)?;
 
                         // Clear the screen and refresh the terminal
+                        execute!(
+                            new_stdout,
+                            crossterm::terminal::Clear(crossterm::terminal::ClearType::All),
+                            crossterm::terminal::Clear(crossterm::terminal::ClearType::Purge),
+                            crossterm::cursor::MoveTo(0, 0)
+                        )?;
                         let backend = CrosstermBackend::new(new_stdout);
                         terminal = Terminal::new(backend)?;
+                        terminal.hide_cursor()?;
                         terminal.clear()?;
                         app.refresh()?;
+                        terminal.draw(|f| draw_ui(f, &mut app, &mut list_state))?;
+                        last_refresh = Instant::now();
+                    }
+                    InputResult::Refreshed => {
                         last_refresh = Instant::now();
                     }
                 }
@@ -1056,16 +1581,171 @@ fn run_tui() -> Result<()> {
     Ok(())
 }
 
+fn hard_reset_terminal(stdout: &mut impl Write) -> Result<()> {
+    stdout.write_all(b"\x1bc")?;
+    stdout.flush()?;
+    Ok(())
+}
+
 enum InputResult {
     Continue,
     Quit,
-    AttachSession(String),
+    AttachSession(AttachTarget),
+    Refreshed,
+}
+
+#[derive(Debug, Clone)]
+enum AttachTarget {
+    Local(String),
+    Remote(HostConfig, String),
+}
+
+#[derive(Debug, Clone)]
+enum NewSessionTarget {
+    Local,
+    Remote(HostConfig),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HostField {
+    Name,
+    Host,
+}
+
+#[derive(Debug, Clone)]
+struct KillTarget {
+    origin: SessionOrigin,
+    session_name: String,
+    attached_clients: usize,
 }
 
 fn handle_input(app: &mut App, key: KeyEvent) -> Result<InputResult> {
     // Handle Ctrl+C for exit
     if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
         return Ok(InputResult::Quit);
+    }
+
+    if app.show_new_host_popup {
+        match key.code {
+            KeyCode::Enter => {
+                match build_host_config(&app.new_host_name_input, &app.new_host_host_input) {
+                    Ok(host) => {
+                        add_host_config(host)?;
+                        app.hide_new_host_popup();
+                        app.refresh()?;
+                        return Ok(InputResult::Refreshed);
+                    }
+                    Err(err) => {
+                        app.new_host_error = Some(err.to_string());
+                    }
+                }
+            }
+            KeyCode::Esc => {
+                app.hide_new_host_popup();
+            }
+            KeyCode::Tab | KeyCode::Down => {
+                app.new_host_active_field = match app.new_host_active_field {
+                    HostField::Name => HostField::Host,
+                    HostField::Host => HostField::Name,
+                };
+            }
+            KeyCode::BackTab | KeyCode::Up => {
+                app.new_host_active_field = match app.new_host_active_field {
+                    HostField::Name => HostField::Host,
+                    HostField::Host => HostField::Name,
+                };
+            }
+            KeyCode::Left => {
+                move_cursor_left(
+                    &app.new_host_active_field,
+                    &mut app.new_host_name_cursor,
+                    &mut app.new_host_host_cursor,
+                );
+            }
+            KeyCode::Right => {
+                move_cursor_right(
+                    &app.new_host_active_field,
+                    &app.new_host_name_input,
+                    &app.new_host_host_input,
+                    &mut app.new_host_name_cursor,
+                    &mut app.new_host_host_cursor,
+                );
+            }
+            KeyCode::Home => {
+                set_cursor_start(
+                    &app.new_host_active_field,
+                    &mut app.new_host_name_cursor,
+                    &mut app.new_host_host_cursor,
+                );
+            }
+            KeyCode::End => {
+                set_cursor_end(
+                    &app.new_host_active_field,
+                    &app.new_host_name_input,
+                    &app.new_host_host_input,
+                    &mut app.new_host_name_cursor,
+                    &mut app.new_host_host_cursor,
+                );
+            }
+            KeyCode::Delete => {
+                app.new_host_error = None;
+                match app.new_host_active_field {
+                    HostField::Name => {
+                        remove_char_at(&mut app.new_host_name_input, &mut app.new_host_name_cursor);
+                    }
+                    HostField::Host => {
+                        remove_char_at(&mut app.new_host_host_input, &mut app.new_host_host_cursor);
+                    }
+                }
+            }
+            KeyCode::Backspace => {
+                app.new_host_error = None;
+                app.backspace_new_host_input();
+            }
+            KeyCode::Char(c) => {
+                app.new_host_error = None;
+                app.handle_new_host_input(c);
+            }
+            _ => {}
+        }
+        return Ok(InputResult::Continue);
+    }
+
+    if app.show_kill_confirm {
+        match key.code {
+            KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
+                if let Some(target) = app.kill_confirm_target.clone() {
+                    match target.origin {
+                        SessionOrigin::Local => {
+                            kill_session(Some(target.session_name.clone()))?;
+                            app.set_status_message("Session killed.");
+                            app.refresh()?;
+                            app.hide_kill_confirm();
+                            return Ok(InputResult::Refreshed);
+                        }
+                        SessionOrigin::Remote(host) => {
+                            match kill_remote_session(&host, &target.session_name) {
+                                Ok(()) => {
+                                    app.set_status_message("Remote session killed.");
+                                    app.refresh()?;
+                                    app.hide_kill_confirm();
+                                    return Ok(InputResult::Refreshed);
+                                }
+                                Err(err) => {
+                                    app.set_status_message(format!("Kill failed: {}", err));
+                                }
+                            }
+                        }
+                    }
+                }
+                app.hide_kill_confirm();
+            }
+            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                app.hide_kill_confirm();
+            }
+            _ => {}
+        }
+        return Ok(InputResult::Continue);
     }
 
     // Handle popup input if showing new session popup
@@ -1077,12 +1757,40 @@ fn handle_input(app: &mut App, key: KeyEvent) -> Result<InputResult> {
                 } else {
                     app.new_session_input.clone()
                 };
-                new_session(Some(session_name))?;
+                match app.new_session_target.clone() {
+                    NewSessionTarget::Local => {
+                        new_session(Some(session_name))?;
+                    }
+                    NewSessionTarget::Remote(host) => {
+                        new_session_remote(&host, Some(session_name))?;
+                    }
+                }
                 app.hide_new_session_popup();
                 app.refresh()?;
+                return Ok(InputResult::Refreshed);
             }
             KeyCode::Esc => {
                 app.hide_new_session_popup();
+            }
+            KeyCode::Left => {
+                if app.new_session_cursor > 0 {
+                    app.new_session_cursor -= 1;
+                }
+            }
+            KeyCode::Right => {
+                let len = app.new_session_input.chars().count();
+                if app.new_session_cursor < len {
+                    app.new_session_cursor += 1;
+                }
+            }
+            KeyCode::Home => {
+                app.new_session_cursor = 0;
+            }
+            KeyCode::End => {
+                app.new_session_cursor = app.new_session_input.chars().count();
+            }
+            KeyCode::Delete => {
+                remove_char_at(&mut app.new_session_input, &mut app.new_session_cursor);
             }
             KeyCode::Backspace => {
                 app.backspace_new_session_input();
@@ -1095,6 +1803,8 @@ fn handle_input(app: &mut App, key: KeyEvent) -> Result<InputResult> {
         return Ok(InputResult::Continue);
     }
 
+    let entries = app.build_entries();
+
     // Normal input handling
     match key.code {
         KeyCode::Char('q') | KeyCode::Esc => return Ok(InputResult::Quit),
@@ -1102,28 +1812,77 @@ fn handle_input(app: &mut App, key: KeyEvent) -> Result<InputResult> {
         KeyCode::Down | KeyCode::Char('j') => app.next(),
         KeyCode::Up | KeyCode::Char('k') => app.previous(),
         KeyCode::Enter => {
-            if !app.sessions.is_empty() {
-                let session_name = app.sessions[app.selected].name.clone();
-                return Ok(InputResult::AttachSession(session_name));
+            if let Some(ListEntry::Session(entry)) = entries.get(app.selected) {
+                match &entry.origin {
+                    SessionOrigin::Local => {
+                        return Ok(InputResult::AttachSession(AttachTarget::Local(
+                            entry.session.name.clone(),
+                        )));
+                    }
+                    SessionOrigin::Remote(host) => {
+                        return Ok(InputResult::AttachSession(AttachTarget::Remote(
+                            host.clone(),
+                            entry.session.name.clone(),
+                        )));
+                    }
+                }
             }
         }
         KeyCode::Char('n') => {
+            app.new_session_target = match entries.get(app.selected) {
+                Some(ListEntry::Session(entry)) => match &entry.origin {
+                    SessionOrigin::Local => NewSessionTarget::Local,
+                    SessionOrigin::Remote(host) => NewSessionTarget::Remote(host.clone()),
+                },
+                Some(ListEntry::Header {
+                    host: Some(host), ..
+                }) => NewSessionTarget::Remote(host.clone()),
+                _ => NewSessionTarget::Local,
+            };
             app.show_new_session_popup();
+        }
+        KeyCode::Char('H') => {
+            app.show_new_host_popup();
         }
         KeyCode::Char('K') => {
             // Kill selected session
-            if !app.sessions.is_empty() {
-                let session_name = app.sessions[app.selected].name.clone();
-                kill_session(Some(session_name))?;
-                app.refresh()?;
-                if app.selected >= app.sessions.len() && app.selected > 0 {
-                    app.selected = app.sessions.len() - 1;
+            if let Some(ListEntry::Session(entry)) = entries.get(app.selected) {
+                if entry.session.attached_clients > 0 {
+                    app.show_kill_confirm(KillTarget {
+                        origin: entry.origin.clone(),
+                        session_name: entry.session.name.clone(),
+                        attached_clients: entry.session.attached_clients,
+                    });
+                    return Ok(InputResult::Continue);
+                }
+
+                match &entry.origin {
+                    SessionOrigin::Local => {
+                        let session_name = entry.session.name.clone();
+                        kill_session(Some(session_name))?;
+                        app.refresh()?;
+                        return Ok(InputResult::Refreshed);
+                    }
+                    SessionOrigin::Remote(host) => {
+                        match kill_remote_session(host, &entry.session.name) {
+                            Ok(()) => {
+                                app.set_status_message("Remote session killed.");
+                                app.refresh()?;
+                                return Ok(InputResult::Refreshed);
+                            }
+                            Err(err) => {
+                                app.set_status_message(format!("Kill failed: {}", err));
+                                return Ok(InputResult::Continue);
+                            }
+                        }
+                    }
                 }
             }
         }
         KeyCode::Char('r') => {
             // Refresh session list
             app.refresh()?;
+            return Ok(InputResult::Refreshed);
         }
         KeyCode::Char('s') => {
             // Save snapshot
@@ -1139,7 +1898,168 @@ fn handle_input(app: &mut App, key: KeyEvent) -> Result<InputResult> {
     Ok(InputResult::Continue)
 }
 
+fn format_attached_users(session: &TmuxSession) -> String {
+    if session.attached_clients == 0 {
+        return "none".to_string();
+    }
+
+    if !session.attached_users.is_empty() {
+        if session.attached_users.len() == 1 {
+            return session.attached_users[0].clone();
+        }
+        let extra = session.attached_users.len() - 1;
+        return format!("{}+{}", session.attached_users[0], extra);
+    }
+
+    format!(
+        "{} client{}",
+        session.attached_clients,
+        if session.attached_clients == 1 {
+            ""
+        } else {
+            "s"
+        }
+    )
+}
+
+fn build_host_config(name_input: &str, host_input: &str) -> Result<HostConfig> {
+    let host = host_input.trim();
+    if host.is_empty() {
+        return Err(anyhow::anyhow!("Host is required"));
+    }
+
+    let mut name = name_input.trim().to_string();
+    if name.is_empty() {
+        name = default_host_name(host);
+    }
+
+    Ok(HostConfig {
+        name,
+        host: host.to_string(),
+        key: None,
+    })
+}
+
+fn default_host_name(host: &str) -> String {
+    if let Some((_, host_part)) = host.rsplit_once('@') {
+        host_part.to_string()
+    } else {
+        host.to_string()
+    }
+}
+
+fn insert_char_at(text: &mut String, ch: char, cursor: &mut usize) {
+    let mut chars: Vec<char> = text.chars().collect();
+    let pos = (*cursor).min(chars.len());
+    chars.insert(pos, ch);
+    *text = chars.iter().collect();
+    *cursor = pos + 1;
+}
+
+fn remove_char_before(text: &mut String, cursor: &mut usize) {
+    if *cursor == 0 {
+        return;
+    }
+    let mut chars: Vec<char> = text.chars().collect();
+    let pos = (*cursor).min(chars.len());
+    if pos == 0 {
+        return;
+    }
+    chars.remove(pos - 1);
+    *text = chars.iter().collect();
+    *cursor = pos - 1;
+}
+
+fn remove_char_at(text: &mut String, cursor: &mut usize) {
+    let mut chars: Vec<char> = text.chars().collect();
+    let pos = (*cursor).min(chars.len());
+    if pos >= chars.len() {
+        return;
+    }
+    chars.remove(pos);
+    *text = chars.iter().collect();
+}
+
+fn move_cursor_left(active: &HostField, name_cursor: &mut usize, host_cursor: &mut usize) {
+    match active {
+        HostField::Name => {
+            if *name_cursor > 0 {
+                *name_cursor -= 1;
+            }
+        }
+        HostField::Host => {
+            if *host_cursor > 0 {
+                *host_cursor -= 1;
+            }
+        }
+    }
+}
+
+fn move_cursor_right(
+    active: &HostField,
+    name_input: &str,
+    host_input: &str,
+    name_cursor: &mut usize,
+    host_cursor: &mut usize,
+) {
+    match active {
+        HostField::Name => {
+            let len = name_input.chars().count();
+            if *name_cursor < len {
+                *name_cursor += 1;
+            }
+        }
+        HostField::Host => {
+            let len = host_input.chars().count();
+            if *host_cursor < len {
+                *host_cursor += 1;
+            }
+        }
+    }
+}
+
+fn set_cursor_start(active: &HostField, name_cursor: &mut usize, host_cursor: &mut usize) {
+    match active {
+        HostField::Name => *name_cursor = 0,
+        HostField::Host => *host_cursor = 0,
+    }
+}
+
+fn set_cursor_end(
+    active: &HostField,
+    name_input: &str,
+    host_input: &str,
+    name_cursor: &mut usize,
+    host_cursor: &mut usize,
+) {
+    match active {
+        HostField::Name => *name_cursor = name_input.chars().count(),
+        HostField::Host => *host_cursor = host_input.chars().count(),
+    }
+}
+
+fn with_cursor(text: &str, cursor: usize, active: bool) -> String {
+    if !active {
+        return text.to_string();
+    }
+
+    let mut result = String::new();
+    let mut idx = 0;
+    for ch in text.chars() {
+        if idx == cursor {
+            result.push('|');
+        }
+        result.push(ch);
+        idx += 1;
+    }
+    if cursor >= idx {
+        result.push('|');
+    }
+    result
+}
+
 fn draw_ui(f: &mut Frame, app: &mut App, list_state: &mut ListState) {
+    app.clear_expired_status();
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .margin(1)
@@ -1162,7 +2082,8 @@ fn draw_ui(f: &mut Frame, app: &mut App, list_state: &mut ListState) {
     f.render_widget(header, chunks[0]);
 
     // Session list
-    if app.sessions.is_empty() {
+    let entries = app.build_entries();
+    if entries.is_empty() {
         let empty_msg =
             Paragraph::new("No tmux sessions found.\nPress 'n' to create a new session.")
                 .style(Style::default().fg(Color::Gray))
@@ -1170,114 +2091,130 @@ fn draw_ui(f: &mut Frame, app: &mut App, list_state: &mut ListState) {
                 .block(Block::default().borders(Borders::ALL).title("Sessions"));
         f.render_widget(empty_msg, chunks[1]);
     } else {
-        let sessions: Vec<ListItem> = app
-            .sessions
+        let sessions: Vec<ListItem> = entries
             .iter()
             .enumerate()
-            .map(|(i, s)| {
-                let status = if s.attached { "●" } else { "○" };
+            .map(|(i, entry)| {
+                let is_selected = i == app.selected;
+                match entry {
+                    ListEntry::Header { title, .. } => {
+                        let content = Line::from(vec![Span::styled(
+                            title.as_str(),
+                            Style::default()
+                                .fg(Color::Cyan)
+                                .add_modifier(Modifier::BOLD),
+                        )]);
+                        let mut item = ListItem::new(content);
+                        if is_selected {
+                            item = item.style(app.get_highlight_style());
+                        }
+                        item
+                    }
+                    ListEntry::Session(entry) => {
+                        let s = &entry.session;
+                        let status = if s.attached { "●" } else { "○" };
+                        let user = format_attached_users(s);
 
-                // Get resource info
-                let (memory_info, cpu_info) = if let Some(ref resource) = s.resource_info {
-                    (
-                        format!("{:.1}MB", resource.memory_mb),
-                        format!("{:.1}%", resource.cpu_percent),
-                    )
-                } else {
-                    ("N/A".to_string(), "N/A".to_string())
-                };
-
-                // Get user info
-                let user = if let Some(ref process) = s.process_info {
-                    &process.user
-                } else {
-                    "unknown"
-                };
-
-                // Add selection indicator prefix for better visibility
-                let selection_prefix = app.get_selection_prefix(i == app.selected);
-
-                let content = Line::from(vec![
-                    Span::styled(
-                        format!("{:<1}", selection_prefix),
-                        Style::default()
-                            .fg(if i == app.selected {
-                                Color::Yellow
-                            } else {
-                                Color::DarkGray
-                            })
-                            .add_modifier(if i == app.selected {
-                                Modifier::BOLD
-                            } else {
-                                Modifier::empty()
-                            }),
-                    ),
-                    Span::styled(
-                        format!("{:<1}", status),
-                        Style::default().fg(if s.attached { Color::Green } else { Color::Red }),
-                    ),
-                    Span::raw(" "),
-                    Span::styled(
-                        format!("{:<15}", s.name),
-                        Style::default()
-                            .fg(if i == app.selected {
-                                Color::Yellow
-                            } else {
-                                Color::White
-                            })
-                            .add_modifier(if i == app.selected {
-                                Modifier::BOLD | Modifier::UNDERLINED
-                            } else {
-                                Modifier::BOLD
-                            }),
-                    ),
-                    Span::styled(
-                        format!("{:>3}W", s.windows),
-                        Style::default().fg(if i == app.selected {
-                            Color::Yellow
+                        // Get resource info
+                        let (memory_info, cpu_info) = if let Some(ref resource) = s.resource_info {
+                            (
+                                format!("{:.1}MB", resource.memory_mb),
+                                format!("{:.1}%", resource.cpu_percent),
+                            )
                         } else {
-                            Color::White
-                        }),
-                    ),
-                    Span::raw(" "),
-                    Span::styled(
-                        format!("{:>8}", memory_info),
-                        Style::default().fg(if i == app.selected {
-                            Color::Yellow
-                        } else {
-                            Color::Cyan
-                        }),
-                    ),
-                    Span::raw(" "),
-                    Span::styled(
-                        format!("{:>6}", cpu_info),
-                        Style::default().fg(if i == app.selected {
-                            Color::Yellow
-                        } else {
-                            Color::Magenta
-                        }),
-                    ),
-                    Span::raw(" "),
-                    Span::styled(
-                        format!("{:<8}", user),
-                        Style::default().fg(if i == app.selected {
-                            Color::Yellow
-                        } else {
-                            Color::Gray
-                        }),
-                    ),
-                ]);
+                            ("N/A".to_string(), "N/A".to_string())
+                        };
 
-                let mut item = ListItem::new(content);
-                if i == app.selected {
-                    // Use terminal-aware highlighting
-                    item = item.style(app.get_highlight_style());
+                        // Add selection indicator prefix for better visibility
+                        let selection_prefix = app.get_selection_prefix(is_selected);
+
+                        let content = Line::from(vec![
+                            Span::styled(
+                                format!("{:<1}", selection_prefix),
+                                Style::default()
+                                    .fg(if is_selected {
+                                        Color::Yellow
+                                    } else {
+                                        Color::DarkGray
+                                    })
+                                    .add_modifier(if is_selected {
+                                        Modifier::BOLD
+                                    } else {
+                                        Modifier::empty()
+                                    }),
+                            ),
+                            Span::styled(
+                                format!("{:<1}", status),
+                                Style::default().fg(if s.attached {
+                                    Color::Green
+                                } else {
+                                    Color::Red
+                                }),
+                            ),
+                            Span::raw(" "),
+                            Span::styled(
+                                format!("{:<15}", s.name),
+                                Style::default()
+                                    .fg(if is_selected {
+                                        Color::Yellow
+                                    } else {
+                                        Color::White
+                                    })
+                                    .add_modifier(if is_selected {
+                                        Modifier::BOLD | Modifier::UNDERLINED
+                                    } else {
+                                        Modifier::BOLD
+                                    }),
+                            ),
+                            Span::styled(
+                                format!("{:>3}W", s.windows),
+                                Style::default().fg(if is_selected {
+                                    Color::Yellow
+                                } else {
+                                    Color::White
+                                }),
+                            ),
+                            Span::raw(" "),
+                            Span::styled(
+                                format!("{:>8}", memory_info),
+                                Style::default().fg(if is_selected {
+                                    Color::Yellow
+                                } else {
+                                    Color::Cyan
+                                }),
+                            ),
+                            Span::raw(" "),
+                            Span::styled(
+                                format!("{:>6}", cpu_info),
+                                Style::default().fg(if is_selected {
+                                    Color::Yellow
+                                } else {
+                                    Color::Magenta
+                                }),
+                            ),
+                            Span::raw(" "),
+                            Span::styled(
+                                format!("{:<8}", user),
+                                Style::default().fg(if is_selected {
+                                    Color::Yellow
+                                } else {
+                                    Color::Gray
+                                }),
+                            ),
+                        ]);
+
+                        let mut item = ListItem::new(content);
+                        if is_selected {
+                            // Use terminal-aware highlighting
+                            item = item.style(app.get_highlight_style());
+                        }
+                        item
+                    }
                 }
-                item
             })
             .collect();
 
-        let title = "Sessions │ Name        │ Win │ Memory │ CPU   │ User    ";
+        let title = "Sessions │ Name        │ Win │ Memory │ CPU   │ Clients ";
         let sessions_list = List::new(sessions)
             .block(Block::default().borders(Borders::ALL).title(title))
             .highlight_style(app.get_highlight_style())
@@ -1288,15 +2225,18 @@ fn draw_ui(f: &mut Frame, app: &mut App, list_state: &mut ListState) {
     }
 
     // Controls/Help
-    let help_text = if app.show_help {
+    let mut help_text: Vec<String> = if app.show_help {
         vec![
-            "↑/↓/j/k: Navigate    Enter: Attach    n: New session",
-            "K: Kill session      r: Refresh       s: Save snapshot",
-            "d: Debug terminal    q/Esc/Ctrl+C: Quit  ?: Toggle help",
+            "↑/↓/j/k: Navigate    Enter: Attach    n: New session    H: Add host".to_string(),
+            "K: Kill session      r: Refresh       s: Save snapshot".to_string(),
+            "d: Debug terminal    q/Esc/Ctrl+C: Quit  ?: Toggle help".to_string(),
         ]
     } else {
-        vec!["Navigate: ↑/↓  Attach: Enter  New: n  Kill: K  Debug: d  Quit: q/Ctrl+C  Help: ?"]
+        vec!["Navigate: ↑/↓  Attach: Enter  New: n  Host: H  Kill: K  Debug: d  Quit: q/Ctrl+C  Help: ?".to_string()]
     };
+    if let Some(ref message) = app.status_message {
+        help_text.push(format!("Status: {}", message));
+    }
 
     let help = Paragraph::new(help_text.join("\n"))
         .style(Style::default().fg(Color::Gray))
@@ -1308,6 +2248,12 @@ fn draw_ui(f: &mut Frame, app: &mut App, list_state: &mut ListState) {
     // Render popup if showing
     if app.show_new_session_popup {
         draw_new_session_popup(f, app);
+    }
+    if app.show_new_host_popup {
+        draw_new_host_popup(f, app);
+    }
+    if app.show_kill_confirm {
+        draw_kill_confirm_popup(f, app);
     }
 }
 
@@ -1327,6 +2273,7 @@ fn draw_new_session_popup(f: &mut Frame, app: &App) {
         .margin(1)
         .constraints([
             Constraint::Length(1),
+            Constraint::Length(3),
             Constraint::Length(1),
             Constraint::Length(1),
             Constraint::Length(1),
@@ -1339,7 +2286,8 @@ fn draw_new_session_popup(f: &mut Frame, app: &App) {
         .style(Style::default().fg(Color::White));
     f.render_widget(input_text, popup_chunks[0]);
 
-    let input_field = Paragraph::new(app.new_session_input.as_str())
+    let input_display = with_cursor(&app.new_session_input, app.new_session_cursor, true);
+    let input_field = Paragraph::new(input_display)
         .style(
             Style::default()
                 .fg(Color::Yellow)
@@ -1348,14 +2296,167 @@ fn draw_new_session_popup(f: &mut Frame, app: &App) {
         .block(Block::default().borders(Borders::ALL));
     f.render_widget(input_field, popup_chunks[1]);
 
+    let target_label = match &app.new_session_target {
+        NewSessionTarget::Local => "Target: local".to_string(),
+        NewSessionTarget::Remote(host) => format!("Target: {} ({})", host.name, host.host),
+    };
+    let target_text = Paragraph::new(target_label).style(Style::default().fg(Color::Gray));
+    f.render_widget(target_text, popup_chunks[2]);
+
     let default_name = format!("Default: session-{}", chrono::Local::now().format("%H%M%S"));
     let default_text = Paragraph::new(default_name).style(Style::default().fg(Color::Gray));
-    f.render_widget(default_text, popup_chunks[2]);
+    f.render_widget(default_text, popup_chunks[3]);
 
     let help_text = Paragraph::new("Enter: Create  Esc: Cancel")
         .style(Style::default().fg(Color::Gray))
         .alignment(Alignment::Center);
-    f.render_widget(help_text, popup_chunks[3]);
+    f.render_widget(help_text, popup_chunks[4]);
+}
+
+fn draw_new_host_popup(f: &mut Frame, app: &App) {
+    let popup_area = centered_rect(70, 40, f.size());
+
+    f.render_widget(Clear, popup_area);
+
+    let popup_block = Block::default()
+        .title("Add Remote Host")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Yellow));
+
+    let popup_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .margin(1)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Length(3),
+            Constraint::Length(1),
+            Constraint::Length(3),
+            Constraint::Length(1),
+            Constraint::Length(1),
+        ])
+        .split(popup_area);
+
+    f.render_widget(popup_block, popup_area);
+
+    let input_text = Paragraph::new("Add a remote host (name optional; key via config or CLI)")
+        .style(Style::default().fg(Color::White));
+    f.render_widget(input_text, popup_chunks[0]);
+
+    let name_active = app.new_host_active_field == HostField::Name;
+    let host_active = app.new_host_active_field == HostField::Host;
+
+    let name_label = Paragraph::new("Name (optional)").style(Style::default().fg(Color::Gray));
+    f.render_widget(name_label, popup_chunks[1]);
+
+    let name_display = with_cursor(
+        &app.new_host_name_input,
+        app.new_host_name_cursor,
+        name_active,
+    );
+    let name_field = Paragraph::new(name_display)
+        .style(
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(if name_active {
+                    Color::Yellow
+                } else {
+                    Color::DarkGray
+                })),
+        );
+    f.render_widget(name_field, popup_chunks[2]);
+
+    let host_label = Paragraph::new("Host (user@host)").style(Style::default().fg(Color::Gray));
+    f.render_widget(host_label, popup_chunks[3]);
+
+    let host_display = with_cursor(
+        &app.new_host_host_input,
+        app.new_host_host_cursor,
+        host_active,
+    );
+    let host_field = Paragraph::new(host_display)
+        .style(
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(if host_active {
+                    Color::Yellow
+                } else {
+                    Color::DarkGray
+                })),
+        );
+    f.render_widget(host_field, popup_chunks[4]);
+
+    let help_text = Paragraph::new("Tab/Shift+Tab: Switch  Enter: Save  Esc: Cancel")
+        .style(Style::default().fg(Color::Gray))
+        .alignment(Alignment::Center);
+    f.render_widget(help_text, popup_chunks[5]);
+
+    if let Some(ref error) = app.new_host_error {
+        let error_text = Paragraph::new(error.as_str())
+            .style(Style::default().fg(Color::Red))
+            .alignment(Alignment::Left);
+        f.render_widget(error_text, popup_chunks[6]);
+    }
+}
+
+fn draw_kill_confirm_popup(f: &mut Frame, app: &App) {
+    let Some(ref target) = app.kill_confirm_target else {
+        return;
+    };
+
+    let popup_area = centered_rect(60, 25, f.size());
+    f.render_widget(Clear, popup_area);
+
+    let popup_block = Block::default()
+        .title("Confirm Kill")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Red));
+
+    let popup_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .margin(1)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
+        ])
+        .split(popup_area);
+
+    f.render_widget(popup_block, popup_area);
+
+    let origin_label = match &target.origin {
+        SessionOrigin::Local => "Local session".to_string(),
+        SessionOrigin::Remote(host) => format!("Remote: {} ({})", host.name, host.host),
+    };
+    let line1 = Paragraph::new(origin_label).style(Style::default().fg(Color::Gray));
+    f.render_widget(line1, popup_chunks[0]);
+
+    let line2 = Paragraph::new(format!(
+        "Kill session '{}' with {} attached client(s)?",
+        target.session_name, target.attached_clients
+    ))
+    .style(
+        Style::default()
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD),
+    );
+    f.render_widget(line2, popup_chunks[1]);
+
+    let help_text = Paragraph::new("Enter/Y: Kill  N/Esc: Cancel")
+        .style(Style::default().fg(Color::Gray))
+        .alignment(Alignment::Center);
+    f.render_widget(help_text, popup_chunks[2]);
 }
 
 fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
@@ -1430,7 +2531,7 @@ mod tests {
 
     #[test]
     fn test_parse_tmux_sessions() {
-        let output = "main:3:1:1234567890:1234567890\ndev:1:0:1234567891:1234567891\ntest:2:0:1234567892:1234567892";
+        let output = "main:3:2:1234567890:1234567890\ndev:1:0:1234567891:1234567891\ntest:2:1:1234567892:1234567892";
         let sessions = parse_tmux_sessions(output);
 
         assert_eq!(sessions.len(), 3);
@@ -1438,14 +2539,17 @@ mod tests {
         assert_eq!(sessions[0].name, "main");
         assert_eq!(sessions[0].windows, 3);
         assert!(sessions[0].attached);
+        assert_eq!(sessions[0].attached_clients, 2);
 
         assert_eq!(sessions[1].name, "dev");
         assert_eq!(sessions[1].windows, 1);
         assert!(!sessions[1].attached);
+        assert_eq!(sessions[1].attached_clients, 0);
 
         assert_eq!(sessions[2].name, "test");
         assert_eq!(sessions[2].windows, 2);
-        assert!(!sessions[2].attached);
+        assert!(sessions[2].attached);
+        assert_eq!(sessions[2].attached_clients, 1);
     }
 
     #[test]
@@ -1514,6 +2618,8 @@ mod tests {
             name: "test".to_string(),
             windows: 2,
             attached: true,
+            attached_clients: 1,
+            attached_users: Vec::new(),
             created: "1234567890".to_string(),
             activity: "1234567890".to_string(),
             process_info: None,
@@ -1533,6 +2639,8 @@ mod tests {
                     name: "session1".to_string(),
                     windows: 1,
                     attached: false,
+                    attached_clients: 0,
+                    attached_users: Vec::new(),
                     created: "123".to_string(),
                     activity: "123".to_string(),
                     process_info: None,
@@ -1542,6 +2650,8 @@ mod tests {
                     name: "session2".to_string(),
                     windows: 2,
                     attached: false,
+                    attached_clients: 0,
+                    attached_users: Vec::new(),
                     created: "124".to_string(),
                     activity: "124".to_string(),
                     process_info: None,
@@ -1551,17 +2661,34 @@ mod tests {
                     name: "session3".to_string(),
                     windows: 3,
                     attached: false,
+                    attached_clients: 0,
+                    attached_users: Vec::new(),
                     created: "125".to_string(),
                     activity: "125".to_string(),
                     process_info: None,
                     resource_info: None,
                 },
             ],
+            remote_hosts: Vec::new(),
             selected: 0,
             show_help: false,
             aliases: HashMap::new(),
+            hosts: Vec::new(),
             show_new_session_popup: false,
             new_session_input: String::new(),
+            new_session_cursor: 0,
+            new_session_target: NewSessionTarget::Local,
+            show_new_host_popup: false,
+            new_host_name_input: String::new(),
+            new_host_name_cursor: 0,
+            new_host_host_input: String::new(),
+            new_host_host_cursor: 0,
+            new_host_active_field: HostField::Host,
+            new_host_error: None,
+            show_kill_confirm: false,
+            kill_confirm_target: None,
+            status_message: None,
+            status_message_expires: None,
             system: System::new_all(),
         };
 
@@ -1587,11 +2714,26 @@ mod tests {
     fn test_app_navigation_empty() {
         let mut app = App {
             sessions: vec![],
+            remote_hosts: Vec::new(),
             selected: 0,
             show_help: false,
             aliases: HashMap::new(),
+            hosts: Vec::new(),
             show_new_session_popup: false,
             new_session_input: String::new(),
+            new_session_cursor: 0,
+            new_session_target: NewSessionTarget::Local,
+            show_new_host_popup: false,
+            new_host_name_input: String::new(),
+            new_host_name_cursor: 0,
+            new_host_host_input: String::new(),
+            new_host_host_cursor: 0,
+            new_host_active_field: HostField::Host,
+            new_host_error: None,
+            show_kill_confirm: false,
+            kill_confirm_target: None,
+            status_message: None,
+            status_message_expires: None,
             system: System::new_all(),
         };
 
@@ -1606,11 +2748,26 @@ mod tests {
     fn test_toggle_help() {
         let mut app = App {
             sessions: vec![],
+            remote_hosts: Vec::new(),
             selected: 0,
             show_help: false,
             aliases: HashMap::new(),
+            hosts: Vec::new(),
             show_new_session_popup: false,
             new_session_input: String::new(),
+            new_session_cursor: 0,
+            new_session_target: NewSessionTarget::Local,
+            show_new_host_popup: false,
+            new_host_name_input: String::new(),
+            new_host_name_cursor: 0,
+            new_host_host_input: String::new(),
+            new_host_host_cursor: 0,
+            new_host_active_field: HostField::Host,
+            new_host_error: None,
+            show_kill_confirm: false,
+            kill_confirm_target: None,
+            status_message: None,
+            status_message_expires: None,
             system: System::new_all(),
         };
 
@@ -1627,6 +2784,8 @@ mod tests {
             name: "main".to_string(),
             windows: 3,
             attached: true,
+            attached_clients: 1,
+            attached_users: Vec::new(),
             created: "123".to_string(),
             activity: "456".to_string(),
             process_info: None,
@@ -1656,7 +2815,8 @@ mod tests {
         // Test that InputResult enum variants work correctly
         let result1 = InputResult::Continue;
         let result2 = InputResult::Quit;
-        let result3 = InputResult::AttachSession("test".to_string());
+        let result3 = InputResult::AttachSession(AttachTarget::Local("test".to_string()));
+        let result4 = InputResult::Refreshed;
 
         match result1 {
             InputResult::Continue => {}
@@ -1669,8 +2829,13 @@ mod tests {
         }
 
         match result3 {
-            InputResult::AttachSession(name) => assert_eq!(name, "test"),
+            InputResult::AttachSession(AttachTarget::Local(name)) => assert_eq!(name, "test"),
             _ => panic!("Expected AttachSession"),
+        }
+
+        match result4 {
+            InputResult::Refreshed => {}
+            _ => panic!("Expected Refreshed"),
         }
     }
 }
